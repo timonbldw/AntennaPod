@@ -42,9 +42,12 @@ import de.danoeh.antennapod.storage.database.FeedDatabaseWriter;
 import de.danoeh.antennapod.storage.preferences.UserPreferences;
 import de.danoeh.antennapod.ui.preferences.screen.synchronization.AuthenticationDialog;
 import de.danoeh.antennapod.ui.screen.feed.RenameFeedDialog;
+import de.danoeh.antennapod.ui.screen.feed.preferences.audioskip.AudioSkipRulesActivity;
+import de.danoeh.antennapod.playback.service.skip.SkipManager;
 import io.reactivex.rxjava3.core.Completable;
 import io.reactivex.rxjava3.core.Maybe;
 import io.reactivex.rxjava3.core.MaybeOnSubscribe;
+import io.reactivex.rxjava3.core.Single;
 import io.reactivex.rxjava3.android.schedulers.AndroidSchedulers;
 import io.reactivex.rxjava3.disposables.Disposable;
 import io.reactivex.rxjava3.schedulers.Schedulers;
@@ -66,6 +69,7 @@ public class FeedSettingsPreferenceFragment extends PreferenceFragmentCompat {
     private static final String PREF_NEW_EPISODES_ACTION = "feedNewEpisodesAction";
     private static final String PREF_FEED_PLAYBACK_SPEED = "feedPlaybackSpeed";
     private static final String PREF_AUTO_SKIP = "feedAutoSkip";
+    private static final String PREF_AUDIO_SKIP_RULES = "audioSkipRules";
     private static final String PREF_NOTIFICATION = "episodeNotification";
     private static final String PREF_RENAME = "rename";
     private static final String PREF_TAGS = "tags";
@@ -74,6 +78,7 @@ public class FeedSettingsPreferenceFragment extends PreferenceFragmentCompat {
 
     private Feed feed;
     private Disposable disposable;
+    private Disposable audioSkipSummaryDisposable;
     private FeedPreferences feedPreferences;
 
     public static FeedSettingsPreferenceFragment newInstance(long feedId) {
@@ -160,9 +165,18 @@ public class FeedSettingsPreferenceFragment extends PreferenceFragmentCompat {
         if (disposable != null) {
             disposable.dispose();
         }
+        if (audioSkipSummaryDisposable != null) {
+            audioSkipSummaryDisposable.dispose();
+        }
     }
 
     private void setupPreferences() {
+        findPreference(PREF_AUDIO_SKIP_RULES).setOnPreferenceClickListener(preference -> {
+            Intent intent = new Intent(requireContext(), AudioSkipRulesActivity.class);
+            intent.putExtra(AudioSkipRulesActivity.EXTRA_FEED_ID, feed.getId());
+            startActivity(intent);
+            return true;
+        });
         findPreference(PREF_AUTO_SKIP).setOnPreferenceClickListener(preference -> {
             new FeedPreferenceSkipDialog(getContext(),
                     feedPreferences.getFeedSkipIntro(), feedPreferences.getFeedSkipEnding()) {
@@ -178,6 +192,7 @@ public class FeedSettingsPreferenceFragment extends PreferenceFragmentCompat {
             }.show();
             return false;
         });
+        updateAudioSkipRulesSummary();
         findPreference(PREF_FEED_PLAYBACK_SPEED).setOnPreferenceClickListener(this::showPlaybackSpeedDialog);
         findPreference(PREF_EPISODE_FILTER).setOnPreferenceClickListener(preference -> {
             new EpisodeFilterDialog(getContext(), feedPreferences.getFilter()) {
@@ -306,6 +321,40 @@ public class FeedSettingsPreferenceFragment extends PreferenceFragmentCompat {
             alert.show();
             return true;
         });
+    }
+
+    @Override
+    public void onResume() {
+        super.onResume();
+        if (feed != null) {
+            updateAudioSkipRulesSummary();
+        }
+    }
+
+    private void updateAudioSkipRulesSummary() {
+        if (feed == null || !isAdded()) {
+            return;
+        }
+        if (audioSkipSummaryDisposable != null) {
+            audioSkipSummaryDisposable.dispose();
+        }
+        audioSkipSummaryDisposable = Single.fromCallable(() -> SkipManager.getInstance(requireContext())
+                        .getRules(String.valueOf(feed.getId())).size())
+                .subscribeOn(Schedulers.computation())
+                .observeOn(AndroidSchedulers.mainThread())
+                .subscribe(count -> {
+                    if (!isAdded()) {
+                        return;
+                    }
+                    Preference preference = findPreference(PREF_AUDIO_SKIP_RULES);
+                    if (preference == null) {
+                        return;
+                    }
+                    preference.setSummary(count == 0
+                            ? getString(R.string.audio_skip_rules_summary_empty)
+                            : getResources().getQuantityString(R.plurals.audio_skip_rules_summary,
+                            count, count));
+                }, error -> Log.d(TAG, Log.getStackTraceString(error)));
     }
 
     private void updateAutoDeleteSummary() {

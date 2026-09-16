@@ -2,7 +2,10 @@ package de.danoeh.antennapod.playback.service;
 
 import android.content.Intent;
 import android.media.audiofx.LoudnessEnhancer;
+import android.net.Uri;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.util.Log;
 import android.webkit.URLUtil;
 import androidx.annotation.NonNull;
@@ -14,6 +17,7 @@ import androidx.media3.common.ForwardingPlayer;
 import androidx.media3.common.MediaItem;
 import androidx.media3.common.PlaybackException;
 import androidx.media3.common.Player;
+import androidx.media3.common.Timeline;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.common.util.Util;
 import androidx.media3.exoplayer.ExoPlayer;
@@ -54,6 +58,14 @@ import de.danoeh.antennapod.playback.service.internal.SkipUtils;
 import de.danoeh.antennapod.playback.service.internal.SleepTimer;
 import de.danoeh.antennapod.playback.service.internal.ClockSleepTimer;
 import de.danoeh.antennapod.playback.service.internal.EpisodeSleepTimer;
+import de.danoeh.antennapod.playback.service.skip.SkipAnalysisSnapshot;
+import de.danoeh.antennapod.playback.service.skip.SkipAnalysisStatus;
+import de.danoeh.antennapod.playback.service.skip.SkipManager;
+import de.danoeh.antennapod.playback.service.skip.SkipOccurrence;
+import de.danoeh.antennapod.playback.service.skip.SkipPlaybackDecision;
+import de.danoeh.antennapod.playback.service.skip.SkipPriority;
+import de.danoeh.antennapod.playback.service.skip.SkipSubscription;
+import de.danoeh.antennapod.playback.service.skip.SkipTask;
 import de.danoeh.antennapod.storage.database.DBReader;
 import de.danoeh.antennapod.storage.database.DBWriter;
 import de.danoeh.antennapod.storage.preferences.PlaybackPreferences;
@@ -91,12 +103,24 @@ public class Media3PlaybackService extends MediaLibraryService {
     private boolean allowStreamingThisTime = false;
     private Disposable mediaLoaderDisposable;
     private Disposable positionObserverDisposable;
+    private Disposable skipPositionObserverDisposable;
     private Disposable queueLoaderDisposable;
     private long lastPositionSaveTime = 0;
     private SleepTimer sleepTimer;
     @Nullable
     private LoudnessEnhancer loudnessEnhancer = null;
     private float volumeAdaptionFactor = 1.0f;
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private final SkipPlaybackDecision.State skipDecisionState = new SkipPlaybackDecision.State();
+    private List<SkipOccurrence> skipOccurrences = Collections.emptyList();
+    private SkipSubscription skipSubscription;
+    private SkipTask skipTask;
+    private String skipFeedId;
+    private String skipEpisodeId;
+    private long skipAnalysisDuration;
+    private long skipMediaGeneration;
+    private long previousSkipPosition = -1;
+    private boolean internalSeek;
 
     @UnstableApi
     @Override
@@ -156,7 +180,7 @@ public class Media3PlaybackService extends MediaLibraryService {
                     long startPosition = RewindAfterPauseUtils.calculatePositionWithRewind(
                             (int) savedPosition, currentPlayable.getLastPlayedTimeStatistics());
                     if (startPosition != savedPosition) {
-                        seekTo(startPosition);
+                        seekInternally(startPosition);
                     }
                 }
                 super.play();
@@ -171,7 +195,8 @@ public class Media3PlaybackService extends MediaLibraryService {
 
             @Override
             public void seekBack() {
-                seekTo(Math.max(0, getCurrentPosition() - UserPreferences.getRewindSecs() * 1000L));
+                seekDeliberately(Math.max(0,
+                        getCurrentPosition() - UserPreferences.getRewindSecs() * 1000L));
             }
 
             @Override
@@ -184,7 +209,7 @@ public class Media3PlaybackService extends MediaLibraryService {
                     return;
                 }
 
-                seekTo(target);
+                seekDeliberately(target);
             }
 
             @Override
@@ -197,8 +222,29 @@ public class Media3PlaybackService extends MediaLibraryService {
             @Override
             public void seekTo(long positionMs) {
                 super.seekTo(positionMs);
+                handleSeek(positionMs);
                 EventBus.getDefault().post(
                         new PlaybackPositionEvent((int) positionMs, (int) player.getDuration()));
+            }
+
+            @Override
+            public void seekTo(int mediaItemIndex, long positionMs) {
+                super.seekTo(mediaItemIndex, positionMs);
+                handleSeek(positionMs);
+                EventBus.getDefault().post(
+                        new PlaybackPositionEvent((int) positionMs, (int) player.getDuration()));
+            }
+
+            @Override
+            public void seekToDefaultPosition() {
+                super.seekToDefaultPosition();
+                handleSeek(getCurrentPosition());
+            }
+
+            @Override
+            public void seekToDefaultPosition(int mediaItemIndex) {
+                super.seekToDefaultPosition(mediaItemIndex);
+                handleSeek(getCurrentPosition());
             }
         };
         player.addListener(playerListener);
@@ -289,7 +335,7 @@ public class Media3PlaybackService extends MediaLibraryService {
                 long startPosition = RewindAfterPauseUtils.calculatePositionWithRewind(
                         (int) savedPosition, currentPlayable.getLastPlayedTimeStatistics());
                 if (startPosition != savedPosition) {
-                    player.seekTo(startPosition);
+                    seekInternally(startPosition);
                 }
             } else {
                 wasTemporarilySuspended = false;
@@ -309,8 +355,18 @@ public class Media3PlaybackService extends MediaLibraryService {
                     || playbackState == Player.STATE_ENDED) {
                 saveCurrentPosition();
             }
+            if (playbackState == Player.STATE_READY && currentPlayable != null) {
+                startSkipAnalysis(currentPlayable);
+            }
             if (playbackState == Player.STATE_ENDED && currentPlayable != null) {
                 handlePlaybackEnded();
+            }
+        }
+
+        @Override
+        public void onTimelineChanged(@NonNull Timeline timeline, int reason) {
+            if (currentPlayable != null) {
+                startSkipAnalysis(currentPlayable);
             }
         }
 
@@ -350,8 +406,11 @@ public class Media3PlaybackService extends MediaLibraryService {
         @Override
         public void onDeviceInfoChanged(@NonNull DeviceInfo deviceInfo) {
             if (deviceInfo.playbackType == DeviceInfo.PLAYBACK_TYPE_REMOTE) {
+                cancelSkipAnalysis();
                 keepServiceRunningWhileCasting();
                 loadCurrentMediaWhileCasting();
+            } else if (currentPlayable != null && skipSubscription == null) {
+                startSkipAnalysis(currentPlayable);
             }
         }
 
@@ -362,9 +421,13 @@ public class Media3PlaybackService extends MediaLibraryService {
                         && CastPlayerWrapper.hasPlaybackJustFinished(Media3PlaybackService.this)) {
                     handlePlaybackEnded();
                 } else {
+                    cancelSkipAnalysis();
                     currentPlayable = null;
                 }
             } else {
+                if (currentPlayable == null || !String.valueOf(currentPlayable.getId()).equals(mediaItem.mediaId)) {
+                    cancelSkipAnalysis();
+                }
                 ensureCurrentMediaLoaded();
             }
         }
@@ -389,6 +452,7 @@ public class Media3PlaybackService extends MediaLibraryService {
     public void onDestroy() {
         PlaybackService.isRunning = false;
         cancelPositionObserver();
+        cancelSkipAnalysis();
         if (sleepTimer != null) {
             sleepTimer.stop();
             sleepTimer = null;
@@ -422,6 +486,9 @@ public class Media3PlaybackService extends MediaLibraryService {
         if (positionObserverDisposable != null) {
             positionObserverDisposable.dispose();
         }
+        if (skipPositionObserverDisposable != null) {
+            skipPositionObserverDisposable.dispose();
+        }
 
         positionObserverDisposable = Observable.interval(1, TimeUnit.SECONDS)
                 .observeOn(AndroidSchedulers.mainThread())
@@ -446,11 +513,17 @@ public class Media3PlaybackService extends MediaLibraryService {
                                     saveCurrentPosition();
                                     lastPositionSaveTime = currentTime;
                                 }
-                                if (SkipUtils.skipEndingIfNecessary(this, currentPlayable, position, duration, speed)) {
-                                    player.seekTo(player.getDuration());
+                                if (!SkipPlaybackDecision.isSuppressed(
+                                        skipOccurrences, position, skipDecisionState)
+                                        && SkipUtils.skipEndingIfNecessary(
+                                                this, currentPlayable, position, duration, speed)) {
+                                    handlePlaybackEnded();
                                 }
                             }
                         }, error -> Log.e(TAG, "Position observer error", error));
+        skipPositionObserverDisposable = Observable.interval(150, TimeUnit.MILLISECONDS)
+                .observeOn(AndroidSchedulers.mainThread())
+                .subscribe(ignored -> applySkipDecision(), error -> Log.e(TAG, "Skip observer error", error));
     }
 
     private void cancelPositionObserver() {
@@ -458,6 +531,146 @@ public class Media3PlaybackService extends MediaLibraryService {
             positionObserverDisposable.dispose();
             positionObserverDisposable = null;
         }
+        if (skipPositionObserverDisposable != null) {
+            skipPositionObserverDisposable.dispose();
+            skipPositionObserverDisposable = null;
+        }
+    }
+
+    private void startSkipAnalysis(FeedMedia media) {
+        long playerDuration = player == null ? 0 : player.getDuration();
+        long duration = skipSubscription == null ? getSkipAnalysisDuration(media) : playerDuration;
+        if (!isCurrentLocalPlayback(media) || media.getItem() == null || media.getItem().getFeed() == null
+                || duration <= 0) {
+            return;
+        }
+        String feedId = String.valueOf(media.getItem().getFeed().getId());
+        String episodeId = String.valueOf(media.getItem().getId());
+        Uri audioUri = Uri.parse(media.getLocalFileUrl());
+        boolean observingEpisode = skipSubscription != null && feedId.equals(skipFeedId)
+                && episodeId.equals(skipEpisodeId);
+        if (observingEpisode && duration == skipAnalysisDuration) {
+            return;
+        }
+        long generation = skipMediaGeneration;
+        skipFeedId = feedId;
+        skipEpisodeId = episodeId;
+        skipAnalysisDuration = duration;
+        SkipManager manager = SkipManager.getInstance(this);
+        skipTask = manager.analyze(feedId, episodeId, audioUri, duration,
+                player.getCurrentPosition(), SkipPriority.CURRENT_PLAYBACK);
+        if (!observingEpisode) {
+            skipSubscription = manager.observe(feedId, episodeId,
+                    snapshot -> mainHandler.post(() -> updateSkipSnapshot(generation, media, snapshot)));
+        }
+    }
+
+    private void restartInvalidatedSkipAnalysis() {
+        FeedMedia media = currentPlayable;
+        long duration = getSkipAnalysisDuration(media);
+        if (!isCurrentLocalPlayback(media) || media.getItem() == null || media.getItem().getFeed() == null
+                || duration <= 0) {
+            return;
+        }
+        if (skipTask != null && !skipTask.isDone()) {
+            return;
+        }
+        skipTask = SkipManager.getInstance(this).analyze(
+                String.valueOf(media.getItem().getFeed().getId()), String.valueOf(media.getItem().getId()),
+                Uri.parse(media.getLocalFileUrl()), duration, player.getCurrentPosition(),
+                SkipPriority.CURRENT_PLAYBACK);
+    }
+
+    private boolean isCurrentLocalPlayback(@Nullable FeedMedia media) {
+        if (media == null || !media.localFileAvailable() || player == null || isCasting()
+                || player.getCurrentMediaItem() == null
+                || player.getCurrentMediaItem().localConfiguration == null) {
+            return false;
+        }
+        return Uri.parse(media.getLocalFileUrl()).equals(player.getCurrentMediaItem().localConfiguration.uri);
+    }
+
+    private long getSkipAnalysisDuration(@Nullable FeedMedia media) {
+        if (player != null && player.getDuration() > 0) {
+            return player.getDuration();
+        }
+        return media == null ? 0 : media.getDuration();
+    }
+
+    private void updateSkipSnapshot(long generation, FeedMedia media, SkipAnalysisSnapshot snapshot) {
+        if (generation != skipMediaGeneration || currentPlayable != media || player == null
+                || !isCurrentLocalPlayback(media)) {
+            return;
+        }
+        skipOccurrences = snapshot.occurrences;
+        SkipPlaybackDecision.updateOccurrences(skipOccurrences, player.getCurrentPosition(), skipDecisionState);
+        if (snapshot.status == SkipAnalysisStatus.NOT_ANALYZED) {
+            restartInvalidatedSkipAnalysis();
+        }
+    }
+
+    private void applySkipDecision() {
+        if (currentPlayable == null || player == null || !player.isPlaying()
+                || !isCurrentLocalPlayback(currentPlayable)) {
+            return;
+        }
+        long position = player.getCurrentPosition();
+        SkipPlaybackDecision.Decision decision = SkipPlaybackDecision.decide(
+                skipOccurrences, previousSkipPosition, position, skipDecisionState);
+        previousSkipPosition = position;
+        if (decision.action == SkipPlaybackDecision.Action.SEEK_TO) {
+            previousSkipPosition = decision.targetMs;
+            seekInternally(decision.targetMs);
+        } else if (decision.action == SkipPlaybackDecision.Action.FINISH) {
+            handlePlaybackEnded();
+        }
+    }
+
+    private void handleSeek(long positionMs) {
+        previousSkipPosition = positionMs;
+        if (!internalSeek && isCurrentPlayableMediaItem()) {
+            SkipPlaybackDecision.onUserSeek(skipOccurrences, positionMs, skipDecisionState);
+            if (skipFeedId != null && skipEpisodeId != null) {
+                SkipManager.getInstance(this).reprioritize(
+                        skipFeedId, skipEpisodeId, positionMs, SkipPriority.CURRENT_PLAYBACK);
+            }
+        }
+    }
+
+    private boolean isCurrentPlayableMediaItem() {
+        return currentPlayable != null && player != null && player.getCurrentMediaItem() != null
+                && String.valueOf(currentPlayable.getId()).equals(player.getCurrentMediaItem().mediaId);
+    }
+
+    private void seekDeliberately(long positionMs) {
+        player.seekTo(positionMs);
+    }
+
+    private void seekInternally(long positionMs) {
+        internalSeek = true;
+        try {
+            player.seekTo(positionMs);
+        } finally {
+            internalSeek = false;
+        }
+    }
+
+    private void cancelSkipAnalysis() {
+        skipMediaGeneration++;
+        if (skipTask != null) {
+            skipTask.cancel();
+            skipTask = null;
+        }
+        if (skipSubscription != null) {
+            skipSubscription.close();
+            skipSubscription = null;
+        }
+        skipOccurrences = Collections.emptyList();
+        SkipPlaybackDecision.updateOccurrences(skipOccurrences, -1, skipDecisionState);
+        skipFeedId = null;
+        skipEpisodeId = null;
+        skipAnalysisDuration = 0;
+        previousSkipPosition = -1;
     }
 
     @OptIn(markerClass = UnstableApi.class)
@@ -519,6 +732,7 @@ public class Media3PlaybackService extends MediaLibraryService {
 
     @OptIn(markerClass = UnstableApi.class)
     private void switchToPlayable(FeedMedia media) {
+        cancelSkipAnalysis();
         currentPlayable = media;
         currentPlayable.onPlaybackStart();
 
@@ -534,6 +748,7 @@ public class Media3PlaybackService extends MediaLibraryService {
             applyVolumeAdaption(1.0f);
         }
         updatePlaybackPreferences();
+        startSkipAnalysis(media);
     }
 
     private void updatePlaybackPreferences() {
@@ -682,6 +897,7 @@ public class Media3PlaybackService extends MediaLibraryService {
     @UnstableApi
     private void showStreamingConfirmation(FeedMedia media) {
         pendingStreamMediaId = String.valueOf(media.getId());
+        cancelSkipAnalysis();
         currentPlayable = null;
         MediaItem confirmItem = MediaItemAdapter.buildStreamingConfirmationItem(this,
                 R.raw.no_streaming,
@@ -702,6 +918,7 @@ public class Media3PlaybackService extends MediaLibraryService {
     @UnstableApi
     private void handlePlaybackEnded() {
         FeedMedia media = currentPlayable;
+        cancelSkipAnalysis();
         currentPlayable = null; // To avoid position updater saving position after we already reset it
         if (sleepTimer != null && sleepTimer.isActive()) {
             sleepTimer.episodeFinishedPlayback();
@@ -734,6 +951,7 @@ public class Media3PlaybackService extends MediaLibraryService {
         if (media == null) {
             return;
         }
+        cancelSkipAnalysis();
         FeedItem item = media.getItem();
         if (item == null) {
             return;
@@ -860,6 +1078,7 @@ public class Media3PlaybackService extends MediaLibraryService {
                 && !event.items.get(index).getMedia().localFileAvailable()) {
             player.stop();
             player.clearMediaItems();
+            cancelSkipAnalysis();
             currentPlayable = null;
             PlaybackPreferences.writeNoMediaPlaying();
             EventBus.getDefault().post(new PlayerStatusEvent());
