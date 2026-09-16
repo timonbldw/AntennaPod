@@ -143,6 +143,12 @@
         </activity>
 
         <activity
+            android:name=".ui.screen.feed.preferences.audioskip.AudioSkipRulesActivity"
+            android:configChanges="keyboardHidden|orientation|screenSize"
+            android:exported="false"
+            android:label="@string/audio_skip_rules_title" />
+
+        <activity
             android:name=".activity.OpmlImportActivity"
             android:configChanges="keyboardHidden|orientation|screenSize"
             android:label="@string/opml_import_label"

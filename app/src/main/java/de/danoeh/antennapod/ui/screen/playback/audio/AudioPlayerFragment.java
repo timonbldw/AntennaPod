@@ -1,6 +1,7 @@
 package de.danoeh.antennapod.ui.screen.playback.audio;
 
 import android.os.Bundle;
+import android.net.Uri;
 import android.util.Log;
 import android.view.KeyEvent;
 import android.view.LayoutInflater;
@@ -11,12 +12,15 @@ import android.widget.ImageButton;
 import android.widget.ProgressBar;
 import android.widget.SeekBar;
 import android.widget.TextView;
+import android.widget.Button;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.cardview.widget.CardView;
 import androidx.fragment.app.Fragment;
 import androidx.interpolator.view.animation.FastOutSlowInInterpolator;
+import androidx.media3.common.DeviceInfo;
+import androidx.media3.common.MediaItem;
 import androidx.media3.session.MediaController;
 import androidx.viewpager2.adapter.FragmentStateAdapter;
 import androidx.viewpager2.widget.ViewPager2;
@@ -28,6 +32,10 @@ import de.danoeh.antennapod.model.feed.Feed;
 import de.danoeh.antennapod.playback.service.PlaybackController;
 import de.danoeh.antennapod.playback.service.PlaybackService;
 import de.danoeh.antennapod.playback.service.PlaybackServiceStarter;
+import de.danoeh.antennapod.playback.service.skip.SkipAnalysisSnapshot;
+import de.danoeh.antennapod.playback.service.skip.SkipAnalysisStatus;
+import de.danoeh.antennapod.playback.service.skip.SkipManager;
+import de.danoeh.antennapod.playback.service.skip.SkipSubscription;
 import de.danoeh.antennapod.storage.database.DBReader;
 import de.danoeh.antennapod.storage.preferences.PlaybackPreferences;
 import de.danoeh.antennapod.ui.appstartintent.MainActivityStarter;
@@ -54,6 +62,7 @@ import de.danoeh.antennapod.BuildConfig;
 import de.danoeh.antennapod.R;
 import de.danoeh.antennapod.activity.MainActivity;
 import de.danoeh.antennapod.ui.common.Converter;
+import de.danoeh.antennapod.ui.screen.chapter.ChaptersFragment;
 import de.danoeh.antennapod.ui.screen.feed.preferences.SkipPreferenceDialog;
 import de.danoeh.antennapod.event.FeedItemEvent;
 import de.danoeh.antennapod.event.PlayerErrorEvent;
@@ -69,6 +78,7 @@ import de.danoeh.antennapod.model.feed.FeedItem;
 import de.danoeh.antennapod.model.feed.FeedMedia;
 import de.danoeh.antennapod.model.playback.Playable;
 import de.danoeh.antennapod.playback.cast.CastEnabledActivity;
+import de.danoeh.antennapod.playback.cast.CastStateListener;
 import de.danoeh.antennapod.storage.preferences.UserPreferences;
 import io.reactivex.rxjava3.core.Maybe;
 import io.reactivex.rxjava3.android.schedulers.AndroidSchedulers;
@@ -100,12 +110,18 @@ public class AudioPlayerFragment extends Fragment implements
     private ProgressBar progressIndicator;
     private CardView cardViewSeek;
     private TextView txtvSeek;
+    private Button skipAnalysisButton;
 
     private FeedMedia currentMedia;
     private Disposable disposable;
     private boolean showTimeLeft;
     private boolean seekedToChapterStart = false;
     private int currentChapterIndex = -1;
+    private SkipSubscription skipSubscription;
+    private String skipFeedId;
+    private String skipEpisodeId;
+    private int skipSourceGeneration;
+    private CastStateListener castStateListener;
 
     @Override
     public View onCreateView(@NonNull LayoutInflater inflater,
@@ -113,6 +129,7 @@ public class AudioPlayerFragment extends Fragment implements
                              @Nullable Bundle savedInstanceState) {
         super.onCreateView(inflater, container, savedInstanceState);
         View root = inflater.inflate(R.layout.audioplayer_fragment, container, false);
+        currentMedia = null;
         root.setOnTouchListener((v, event) -> true); // Avoid clicks going through player to fragments below
         toolbar = root.findViewById(R.id.toolbar);
         toolbar.setTitle("");
@@ -139,6 +156,9 @@ public class AudioPlayerFragment extends Fragment implements
         progressIndicator = root.findViewById(R.id.progLoading);
         cardViewSeek = root.findViewById(R.id.cardViewSeek);
         txtvSeek = root.findViewById(R.id.txtvSeek);
+        skipAnalysisButton = root.findViewById(R.id.skipAnalysisButton);
+        skipAnalysisButton.setOnClickListener(v -> showSkipAnalysisDialog());
+        sbPosition.setContentDescription(getString(R.string.audio_skip_playback_show_sections));
 
         setupLengthTextView();
         setupControlButtons();
@@ -298,9 +318,10 @@ public class AudioPlayerFragment extends Fragment implements
         })
         .subscribeOn(Schedulers.computation())
         .observeOn(AndroidSchedulers.mainThread())
-        .subscribe(media -> {
+           .subscribe(media -> {
             currentMedia = media;
             updateUi();
+            subscribeToSkipAnalysis();
             if (media.getChapters() == null && !includingChapters) {
                 loadMediaInfo(true);
             }
@@ -318,6 +339,107 @@ public class AudioPlayerFragment extends Fragment implements
         boolean isPlaying = PlaybackService.isRunning
                 && PlaybackPreferences.getCurrentPlayerStatus() == PlaybackPreferences.PLAYER_STATUS_PLAYING;
         butPlay.setIsShowPlay(!isPlaying);
+    }
+
+    private void subscribeToSkipAnalysis() {
+        final int generation = ++skipSourceGeneration;
+        unsubscribeFromSkipAnalysis();
+        sbPosition.setSkipAnalysis(null);
+        skipAnalysisButton.setVisibility(View.GONE);
+        if (currentMedia == null || currentMedia.getItem() == null
+                || currentMedia.getItem().getFeed() == null) {
+            return;
+        }
+        skipFeedId = String.valueOf(currentMedia.getItem().getFeed().getId());
+        skipEpisodeId = String.valueOf(currentMedia.getItem().getId());
+        if (skipFeedId == null || skipFeedId.isEmpty() || skipEpisodeId == null
+                || skipEpisodeId.isEmpty() || currentMedia.getDuration() <= 0) {
+            return;
+        }
+        final FeedMedia observedMedia = currentMedia;
+        PlaybackController.bindToMedia3Service(getActivity(), controller -> {
+            boolean localPlayback = isCurrentLocalPlayback(controller, observedMedia);
+            if (getActivity() != null) {
+                getActivity().runOnUiThread(() -> {
+                    if (!isAdded() || getView() == null || currentMedia == null
+                            || currentMedia.getId() != observedMedia.getId()
+                            || generation != skipSourceGeneration || sbPosition == null) {
+                        return;
+                    }
+                    if (!localPlayback) {
+                        skipAnalysisButton.setVisibility(View.VISIBLE);
+                        skipAnalysisButton.setEnabled(false);
+                        skipAnalysisButton.setText(R.string.audio_skip_playback_no_audio);
+                        skipAnalysisButton.setContentDescription(skipAnalysisButton.getText());
+                        return;
+                    }
+                    observeSkipSnapshot(generation, observedMedia);
+                });
+            }
+        });
+    }
+
+    private boolean isCurrentLocalPlayback(MediaController controller, FeedMedia media) {
+        if (!media.localFileAvailable() || media.getLocalFileUrl() == null) {
+            return false;
+        }
+        if (controller.getDeviceInfo().playbackType == DeviceInfo.PLAYBACK_TYPE_REMOTE) {
+            return false;
+        }
+        MediaItem item = controller.getCurrentMediaItem();
+        return item != null && item.localConfiguration != null
+                && String.valueOf(media.getId()).equals(item.mediaId)
+                && Uri.parse(media.getLocalFileUrl()).equals(item.localConfiguration.uri);
+    }
+
+    private void observeSkipSnapshot(int generation, FeedMedia media) {
+        SkipManager manager = SkipManager.getInstance(requireContext());
+        SkipAnalysisSnapshot initialSnapshot = manager.getSnapshot(skipFeedId, skipEpisodeId);
+        sbPosition.setSkipAnalysis(initialSnapshot);
+        updateSkipAnalysisButton(initialSnapshot);
+        final String observedFeedId = skipFeedId;
+        final String observedEpisodeId = skipEpisodeId;
+        skipSubscription = manager.observe(skipFeedId, skipEpisodeId, snapshot -> {
+            if (getActivity() != null) {
+                getActivity().runOnUiThread(() -> {
+                    if (!isAdded() || getView() == null || currentMedia == null
+                            || currentMedia.getId() != media.getId()
+                            || generation != skipSourceGeneration
+                            || !observedFeedId.equals(snapshot.feedId)
+                            || !observedEpisodeId.equals(snapshot.episodeId)
+                            || sbPosition == null) {
+                        return;
+                    }
+                    sbPosition.setSkipAnalysis(snapshot);
+                    updateSkipAnalysisButton(snapshot);
+                });
+            }
+        });
+    }
+
+    private void updateSkipAnalysisButton(SkipAnalysisSnapshot snapshot) {
+        if (snapshot == null || snapshot.status == SkipAnalysisStatus.NOT_ANALYZED) {
+            skipAnalysisButton.setVisibility(View.GONE);
+            return;
+        }
+        skipAnalysisButton.setVisibility(View.VISIBLE);
+        skipAnalysisButton.setEnabled(snapshot.status == SkipAnalysisStatus.READY
+                && !snapshot.occurrences.isEmpty());
+        if (snapshot.status == SkipAnalysisStatus.ANALYZING) {
+            skipAnalysisButton.setText(getString(R.string.audio_skip_playback_analyzing));
+        } else if (snapshot.status == SkipAnalysisStatus.READY) {
+            skipAnalysisButton.setText(getString(R.string.audio_skip_playback_ready,
+                    snapshot.occurrences.size()));
+        } else if (snapshot.status == SkipAnalysisStatus.NO_MATCHES) {
+            skipAnalysisButton.setText(getString(R.string.audio_skip_playback_no_matches));
+        } else {
+            skipAnalysisButton.setText(getString(R.string.audio_skip_playback_error));
+        }
+        skipAnalysisButton.setContentDescription(skipAnalysisButton.getText());
+    }
+
+    private void showSkipAnalysisDialog() {
+        new ChaptersFragment().show(getChildFragmentManager(), ChaptersFragment.TAG);
     }
 
     @Subscribe(threadMode = ThreadMode.MAIN)
@@ -341,6 +463,21 @@ public class AudioPlayerFragment extends Fragment implements
         super.onStart();
         loadMediaInfo(false);
         EventBus.getDefault().register(this);
+        castStateListener = new CastStateListener(requireContext()) {
+            @Override
+            public void onSessionStartedOrEnded() {
+                if (getActivity() != null) {
+                    getActivity().runOnUiThread(() -> {
+                        if (isAdded() && isResumed()) {
+                            subscribeToSkipAnalysis();
+                        }
+                    });
+                }
+            }
+        };
+        if (currentMedia != null) {
+            subscribeToSkipAnalysis();
+        }
         txtvRev.setText(NumberFormat.getInstance().format(UserPreferences.getRewindSecs()));
         txtvFF.setText(NumberFormat.getInstance().format(UserPreferences.getFastForwardSecs()));
     }
@@ -348,11 +485,34 @@ public class AudioPlayerFragment extends Fragment implements
     @Override
     public void onStop() {
         super.onStop();
+        skipSourceGeneration++;
         progressIndicator.setVisibility(View.GONE);
         EventBus.getDefault().unregister(this);
         if (disposable != null) {
             disposable.dispose();
         }
+        if (castStateListener != null) {
+            castStateListener.destroy();
+            castStateListener = null;
+        }
+        unsubscribeFromSkipAnalysis();
+        if (sbPosition != null) {
+            sbPosition.setSkipAnalysis(null);
+        }
+    }
+
+    private void unsubscribeFromSkipAnalysis() {
+        if (skipSubscription != null) {
+            skipSubscription.close();
+            skipSubscription = null;
+        }
+    }
+
+    @Override
+    public void onDestroyView() {
+        skipSourceGeneration++;
+        unsubscribeFromSkipAnalysis();
+        super.onDestroyView();
     }
 
     @Subscribe(threadMode = ThreadMode.MAIN)
@@ -486,6 +646,7 @@ public class AudioPlayerFragment extends Fragment implements
 
     public void setupOptionsMenu() {
         toolbar.getMenu().findItem(R.id.open_feed_item).setVisible(true);
+        toolbar.getMenu().findItem(R.id.player_show_chapters).setVisible(true);
         FeedItemMenuHandler.onPrepareMenu(toolbar.getMenu(),
                 Collections.singletonList(currentMedia.getItem()));
         ((CastEnabledActivity) getActivity()).requestCastButton(toolbar.getMenu());
@@ -514,6 +675,9 @@ public class AudioPlayerFragment extends Fragment implements
             if (feedItem != null) {
                 openFeed(feedItem.getFeed());
             }
+            return true;
+        } else if (itemId == R.id.player_show_chapters) {
+            showSkipAnalysisDialog();
             return true;
         }
         return false;

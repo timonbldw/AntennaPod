@@ -6,7 +6,15 @@ import android.graphics.Paint;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.AttributeSet;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import de.danoeh.antennapod.playback.service.skip.SkipAnalysisSnapshot;
+import de.danoeh.antennapod.playback.service.skip.SkipAnalysisStatus;
+import de.danoeh.antennapod.playback.service.skip.SkipCoverage;
+import de.danoeh.antennapod.playback.service.skip.SkipOccurrence;
 import de.danoeh.antennapod.R;
+import de.danoeh.antennapod.ui.common.Converter;
 import de.danoeh.antennapod.ui.common.ThemeUtils;
 
 public class ChapterSeekBar extends androidx.appcompat.widget.AppCompatSeekBar {
@@ -21,7 +29,13 @@ public class ChapterSeekBar extends androidx.appcompat.widget.AppCompatSeekBar {
     private float[] dividerPos;
     private boolean isHighlighted = false;
     private final Paint paintBackground = new Paint();
+    private final Paint paintBuffer = new Paint();
+    private final Paint paintCoverage = new Paint();
+    private final Paint paintDetected = new Paint();
     private final Paint paintProgressPrimary = new Paint();
+    private List<SkipCoverage> analysisCoverage = Collections.emptyList();
+    private List<SkipOccurrence> detectedOccurrences = Collections.emptyList();
+    private long analysisDuration;
 
     public ChapterSeekBar(Context context) {
         super(context);
@@ -45,7 +59,48 @@ public class ChapterSeekBar extends androidx.appcompat.widget.AppCompatSeekBar {
 
         paintBackground.setColor(ThemeUtils.getColorFromAttr(getContext(), R.attr.colorSurfaceVariant));
         paintBackground.setAlpha(128);
+        paintBuffer.setColor(ThemeUtils.getColorFromAttr(getContext(), R.attr.colorSurfaceVariant));
+        paintBuffer.setAlpha(220);
+        paintCoverage.setColor(ThemeUtils.getColorFromAttr(getContext(), R.attr.colorSurfaceContainerHighest));
+        paintCoverage.setAlpha(180);
+        paintDetected.setColor(ThemeUtils.getColorFromAttr(getContext(), R.attr.colorPrimary));
+        paintDetected.setAlpha(150);
         paintProgressPrimary.setColor(ThemeUtils.getColorFromAttr(getContext(), R.attr.colorPrimary));
+    }
+
+    public void setSkipAnalysis(SkipAnalysisSnapshot snapshot) {
+        if (snapshot == null) {
+            analysisCoverage = Collections.emptyList();
+            detectedOccurrences = Collections.emptyList();
+            analysisDuration = 0;
+            setContentDescription(getContext().getString(R.string.audio_skip_playback_not_analyzed));
+        } else {
+            analysisCoverage = new ArrayList<>(snapshot.coverage);
+            detectedOccurrences = new ArrayList<>(snapshot.occurrences);
+            analysisDuration = snapshot.durationMs;
+            if (!snapshot.occurrences.isEmpty()) {
+                SkipOccurrence occurrence = snapshot.occurrences.get(0);
+                setContentDescription(getContext().getString(
+                        R.string.audio_skip_playback_detected_count_accessibility,
+                        snapshot.occurrences.size()) + ". " + getContext().getString(
+                        R.string.audio_skip_playback_detected_accessibility,
+                        Converter.getDurationStringLong((int) occurrence.startMs),
+                        Converter.getDurationStringLong((int) occurrence.endMs)));
+            } else if (!snapshot.coverage.isEmpty()) {
+                SkipCoverage coverage = snapshot.coverage.get(0);
+                setContentDescription(getContext().getString(
+                        R.string.audio_skip_playback_coverage_accessibility,
+                        Converter.getDurationStringLong((int) coverage.startMs),
+                        Converter.getDurationStringLong((int) coverage.endMs)));
+            } else if (snapshot.status == SkipAnalysisStatus.NO_MATCHES) {
+                setContentDescription(getContext().getString(R.string.audio_skip_playback_no_matches));
+            } else if (snapshot.status == SkipAnalysisStatus.ERROR) {
+                setContentDescription(getContext().getString(R.string.audio_skip_playback_error));
+            } else {
+                setContentDescription(getContext().getString(R.string.audio_skip_playback_analyzing));
+            }
+        }
+        invalidate();
     }
 
     /**
@@ -96,7 +151,8 @@ public class ChapterSeekBar extends androidx.appcompat.widget.AppCompatSeekBar {
         final int saveCount = canvas.save();
         canvas.translate(getPaddingLeft(), getPaddingTop());
         canvas.drawRect(0, top, width, bottom, paintBackground);
-        canvas.drawRect(0, top, progressSecondary, bottom, paintBackground);
+        canvas.drawRect(0, top, progressSecondary, bottom, paintBuffer);
+        drawAnalysisRanges(canvas);
         canvas.drawRect(0, top, progressPrimary, bottom, paintProgressPrimary);
         canvas.restoreToCount(saveCount);
     }
@@ -110,21 +166,15 @@ public class ChapterSeekBar extends androidx.appcompat.widget.AppCompatSeekBar {
 
         canvas.translate(getPaddingLeft(), getPaddingTop());
 
+        canvas.drawRect(0, top, width, bottom, paintBackground);
+        canvas.drawRect(0, top, progressSecondary, bottom, paintBuffer);
+        drawAnalysisRanges(canvas);
+
         for (int i = 1; i < dividerPos.length; i++) {
             float right = dividerPos[i] * width - chapterMargin;
             float left = dividerPos[i - 1] * width;
             float rightCurr = dividerPos[currChapter] * width - chapterMargin;
             float leftCurr = dividerPos[currChapter - 1] * width;
-
-            canvas.drawRect(left, top, right, bottom, paintBackground);
-
-            if (progressSecondary > 0 && progressSecondary < width) {
-                if (right < progressSecondary) {
-                    canvas.drawRect(left, top, right, bottom, paintBackground);
-                } else if (progressSecondary > left) {
-                    canvas.drawRect(left, top, progressSecondary, bottom, paintBackground);
-                }
-            }
 
             if (right < progressPrimary) {
                 currChapter = i + 1;
@@ -137,6 +187,26 @@ public class ChapterSeekBar extends androidx.appcompat.widget.AppCompatSeekBar {
             }
         }
         canvas.restoreToCount(saveCount);
+    }
+
+    private void drawAnalysisRanges(Canvas canvas) {
+        if (analysisDuration <= 0) {
+            return;
+        }
+        for (SkipCoverage range : analysisCoverage) {
+            drawRange(canvas, range.startMs, range.endMs, paintCoverage);
+        }
+        for (SkipOccurrence occurrence : detectedOccurrences) {
+            drawRange(canvas, occurrence.startMs, occurrence.endMs, paintDetected);
+        }
+    }
+
+    private void drawRange(Canvas canvas, long startMs, long endMs, Paint paint) {
+        float left = Math.max(0, Math.min(width, startMs / (float) analysisDuration * width));
+        float right = Math.max(left, Math.min(width, endMs / (float) analysisDuration * width));
+        if (right > left) {
+            canvas.drawRect(left, top, right, bottom, paint);
+        }
     }
 
     private void drawThumb(Canvas canvas) {

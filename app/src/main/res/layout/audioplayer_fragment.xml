@@ -96,6 +96,15 @@
                 android:max="500"
                 tools:progress="100" />
 
+            <Button
+                android:id="@+id/skipAnalysisButton"
+                style="@style/Widget.Material3.Button.TextButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:visibility="gone"
+                tools:text="Automatic skip sections available (2)"
+                tools:visibility="visible" />
+
             <RelativeLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
