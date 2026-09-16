@@ -3,6 +3,22 @@
     xmlns:tools="http://schemas.android.com/tools"
     tools:ignore="MissingTranslation">
 
+    <string name="audio_skip_playback_analyzing">Analyzing automatic skip sections</string>
+    <string name="audio_skip_playback_ready">Automatic skip sections available (%1$d)</string>
+    <string name="audio_skip_playback_no_matches">No automatic skip sections detected</string>
+    <string name="audio_skip_playback_not_analyzed">Automatic skip analysis not started</string>
+    <string name="audio_skip_playback_error">Automatic skip analysis unavailable</string>
+    <string name="audio_skip_playback_no_audio">No playable audio source</string>
+    <string name="audio_skip_playback_sections_title">Automatic skip sections</string>
+    <string name="audio_skip_playback_show_sections">Show detected sections</string>
+    <string name="audio_skip_playback_rule">Automatic: %1$s</string>
+    <string name="audio_skip_playback_range">%1$s - %2$s</string>
+    <string name="audio_skip_playback_listen">Listen to section</string>
+    <string name="audio_skip_playback_jump_to_end">Jump to end</string>
+    <string name="audio_skip_playback_coverage_accessibility">Analyzed audio from %1$s to %2$s</string>
+    <string name="audio_skip_playback_detected_accessibility">Detected automatic skip section from %1$s to %2$s</string>
+    <string name="audio_skip_playback_detected_count_accessibility">Detected automatic skip sections: %1$d</string>
+
     <!-- Shared strings that are, or can, be shared throughout the UI  -->
     <string name="general_expand_button">Expand</string>
     <string name="general_collapse_button">Collapse</string>
@@ -1063,4 +1079,88 @@
     <string name="wearos_play_on_phone" tools:ignore="UnusedResources">Play on phone</string>
     <string name="wearos_browse_phone" tools:ignore="UnusedResources">Browse phone</string>
     <string name="wearos_open_on_phone" tools:ignore="UnusedResources">Open on phone</string>
+
+    <string name="audio_skip_rules_title">Audio skip rules</string>
+    <string name="audio_skip_rules_summary_empty">No audio skip rules configured</string>
+    <plurals name="audio_skip_rules_summary">
+        <item quantity="one">1 audio skip rule configured</item>
+        <item quantity="other">%d audio skip rules configured</item>
+    </plurals>
+    <string name="audio_skip_add_rule">Add rule</string>
+    <string name="audio_skip_new_rule">New rule</string>
+    <string name="audio_skip_edit_rule">Edit rule</string>
+    <string name="audio_skip_rule_name">Rule name</string>
+    <string name="audio_skip_rule_name_hint">For example: Sponsor segment</string>
+    <string name="audio_skip_behavior_section">Rule behavior</string>
+    <string name="audio_skip_durations_section">Durations</string>
+    <string name="audio_skip_search_section">Search region</string>
+    <string name="audio_skip_test_section">Test rule</string>
+    <string name="audio_skip_source_section">Audio source</string>
+    <string name="audio_skip_selection_section">Sample selection</string>
+    <string name="audio_skip_rule_type">Rule type</string>
+    <string name="audio_skip_type_between">Between start and end markers</string>
+    <string name="audio_skip_type_fixed">Fixed duration from start marker</string>
+    <string name="audio_skip_type_finish">From start marker to episode end</string>
+    <string name="audio_skip_min_duration">Minimum duration</string>
+    <string name="audio_skip_max_duration">Maximum duration</string>
+    <string name="audio_skip_fixed_duration">Skip duration</string>
+    <string name="audio_skip_missing_end">When the end marker is missing</string>
+    <string name="audio_skip_missing_untouched">Leave audio untouched</string>
+    <string name="audio_skip_missing_fixed">Skip a fixed duration</string>
+    <string name="audio_skip_missing_duration">Fallback duration</string>
+    <string name="audio_skip_first_region">Only search in first</string>
+    <string name="audio_skip_last_region">Only search in last</string>
+    <string name="audio_skip_rule_samples">Audio samples</string>
+    <string name="audio_skip_no_samples">Add a downloaded episode sample for each marker variant.</string>
+    <string name="audio_skip_add_start_sample">Add start sample</string>
+    <string name="audio_skip_add_end_sample">Add end sample</string>
+    <string name="audio_skip_replace_sample">Replace sample</string>
+    <string name="audio_skip_remove_sample">Remove sample</string>
+    <string name="audio_skip_sample_start">Start marker</string>
+    <string name="audio_skip_sample_end">End marker</string>
+    <string name="audio_skip_sample_editor">Audio sample</string>
+    <string name="audio_skip_source_episode">Downloaded episode</string>
+    <string name="audio_skip_no_downloaded_episodes">Download an episode from this podcast to create a sample.</string>
+    <string name="audio_skip_window_position">Audio position</string>
+    <string name="audio_skip_sample_start_time">Sample start</string>
+    <string name="audio_skip_sample_end_time">Sample end</string>
+    <string name="audio_skip_timestamp_hint">00:00.000 or 0:00:00.000</string>
+    <string name="audio_skip_waveform_loading">Loading waveform...</string>
+    <string name="audio_skip_waveform_unavailable">Waveform unavailable for this audio.</string>
+    <string name="audio_skip_waveform_accessibility">Audio waveform with adjustable sample start and end handles</string>
+    <string name="audio_skip_zoom_in">Zoom in</string>
+    <string name="audio_skip_zoom_out">Zoom out</string>
+    <string name="audio_skip_start_back">Start back</string>
+    <string name="audio_skip_start_forward">Start forward</string>
+    <string name="audio_skip_end_back">End back</string>
+    <string name="audio_skip_end_forward">End forward</string>
+    <string name="audio_skip_play_sample">Play sample</string>
+    <string name="audio_skip_loop_sample">Loop sample</string>
+    <string name="audio_skip_play_surrounding">Play surrounding audio</string>
+    <string name="audio_skip_stop_preview">Stop preview</string>
+    <string name="audio_skip_test_rule">Test rule</string>
+    <string name="audio_skip_test_analyzing">Analyzing selected episode...</string>
+    <string name="audio_skip_test_no_matches">No matches found.</string>
+    <string name="audio_skip_test_ready">Found %1$d matching range(s): %2$s</string>
+    <string name="audio_skip_test_error">Rule test failed: %s</string>
+    <string name="audio_skip_sample_weak">This sample is too quiet or unclear. Choose a stronger clip.</string>
+    <string name="audio_skip_validation_name">Enter a rule name.</string>
+    <string name="audio_skip_validation_samples">Add the required start and end samples before saving.</string>
+    <string name="audio_skip_validation_duration">Enter a valid duration between 00:00.500 and 00:30.000.</string>
+    <string name="audio_skip_validation_range">The minimum duration must not exceed the maximum duration.</string>
+    <string name="audio_skip_validation_fixed">Enter a fixed duration greater than zero.</string>
+    <string name="audio_skip_validation_fallback">Enter a fallback duration greater than zero.</string>
+    <string name="audio_skip_validation_region">Enter valid first and last search regions.</string>
+    <string name="audio_skip_validation_timestamp">Enter valid sample timestamps inside the visible audio window.</string>
+    <string name="audio_skip_validation_rule">The rule contains invalid values or audio samples.</string>
+    <string name="audio_skip_delete_confirm">Delete this audio skip rule?</string>
+    <string name="audio_skip_delete_rule">Delete</string>
+    <string name="audio_skip_enabled">Enabled</string>
+    <string name="audio_skip_disabled">Disabled</string>
+    <string name="audio_skip_rule_summary">%1$s - %2$s - %3$s</string>
+    <string name="audio_skip_type_between_short">Between</string>
+    <string name="audio_skip_type_fixed_short">Fixed</string>
+    <string name="audio_skip_type_finish_short">Finish</string>
+    <string name="audio_skip_markers_summary">%1$d sample(s)</string>
+    <string name="audio_skip_preview_unavailable">Preview is unavailable for this episode.</string>
 </resources>
