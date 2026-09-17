@@ -176,13 +176,20 @@ public final class SkipManager {
     }
 
     public SkipTask extractSample(String feedId, String episodeId, Uri audioUri, SkipMarker marker,
-                                  long startMs, long endMs, long markerOffsetMs,
-                                  SkipSampleCallback callback) {
+                                   long startMs, long endMs, long markerOffsetMs,
+                                   SkipSampleCallback callback) {
+        return extractSample(feedId, episodeId, audioUri, marker, startMs, endMs, markerOffsetMs, -1,
+                callback);
+    }
+
+    public SkipTask extractSample(String feedId, String episodeId, Uri audioUri, SkipMarker marker,
+                                   long startMs, long endMs, long markerOffsetMs, long sourcePositionMs,
+                                   SkipSampleCallback callback) {
         requireId(feedId);
         requireId(episodeId);
         validateRange(startMs, endMs);
         if (audioUri == null || marker == null || callback == null
-                || markerOffsetMs < 0 || markerOffsetMs > endMs - startMs) {
+                || markerOffsetMs < 0 || markerOffsetMs > endMs - startMs || sourcePositionMs < -1) {
             throw new IllegalArgumentException("Invalid sample request");
         }
         return executor.execute(SkipPriority.CURRENT_PLAYBACK, () -> {
@@ -201,7 +208,7 @@ public final class SkipManager {
                 }
                 if (!Thread.currentThread().isInterrupted()) {
                     callback.onSuccess(new SkipSample(UUID.randomUUID().toString(), marker,
-                            endMs - startMs, markerOffsetMs, fingerprint));
+                            endMs - startMs, markerOffsetMs, sourcePositionMs, fingerprint));
                 }
             } catch (Exception error) {
                 if (!Thread.currentThread().isInterrupted() && !(error instanceof InterruptedException)) {
@@ -252,13 +259,26 @@ public final class SkipManager {
     }
 
     public SkipTask testRule(SkipRule rule, Uri audioUri, long durationMs, SkipAnalysisCallback callback) {
+        return testRule(rule, audioUri, durationMs, 0, callback, false);
+    }
+
+    public SkipTask testRule(SkipRule rule, Uri audioUri, long durationMs, long positionMs,
+                             SkipAnalysisCallback callback) {
+        return testRule(rule, audioUri, durationMs, positionMs, callback, true);
+    }
+
+    private SkipTask testRule(SkipRule rule, Uri audioUri, long durationMs, long positionMs,
+                              SkipAnalysisCallback callback, boolean bounded) {
         validateAnalysis(audioUri, durationMs, 0);
         if (rule == null || callback == null) {
             throw new IllegalArgumentException("Invalid test request");
         }
         rule.validate();
+        long hint = Math.max(0, Math.min(positionMs, durationMs));
         AnalysisJob job = new AnalysisJob("unsaved", "unsaved", audioUri, durationMs, 0,
-                SkipPriority.HIGH, Collections.singletonList(rule.withEnabled(true)), callback);
+                SkipPriority.HIGH, Collections.singletonList(rule.withEnabled(true)), callback,
+                bounded ? Math.max(0, hint - 5_000) : -1,
+                bounded ? testEndPosition(rule, hint, durationMs) : -1);
         job.enqueue();
         return job.task;
     }
@@ -280,9 +300,17 @@ public final class SkipManager {
         private boolean noEnabledRules;
         private List<SkipCoverage> coverage = new ArrayList<>();
         private List<SkipMarkerHit> hits = new ArrayList<>();
+        private final long analysisStartMs;
+        private final long analysisEndMs;
 
         AnalysisJob(String feedId, String episodeId, Uri audioUri, long durationMs, long positionMs,
                     SkipPriority priority, List<SkipRule> rules, SkipAnalysisCallback callback) {
+            this(feedId, episodeId, audioUri, durationMs, positionMs, priority, rules, callback, -1, -1);
+        }
+
+        AnalysisJob(String feedId, String episodeId, Uri audioUri, long durationMs, long positionMs,
+                    SkipPriority priority, List<SkipRule> rules, SkipAnalysisCallback callback,
+                    long analysisStartMs, long analysisEndMs) {
             this.feedId = feedId;
             this.episodeId = episodeId;
             key = key(feedId, episodeId);
@@ -293,6 +321,8 @@ public final class SkipManager {
             this.priority = priority == null ? SkipPriority.BACKGROUND : priority;
             this.rules = rules;
             this.callback = callback;
+            this.analysisStartMs = analysisStartMs;
+            this.analysisEndMs = analysisEndMs;
         }
 
         void enqueue() {
@@ -311,10 +341,15 @@ public final class SkipManager {
                 if (reusableSource(audioUri) && !identity.equals(sourceIdentity(audioUri))) {
                     throw new IOException("Audio source changed during analysis");
                 }
-                if (!rules.isEmpty() && !isFullyCovered(coverage, durationMs)) {
-                    long startMs = chooseWindowStart(positionMs, durationMs, coverage);
+                long coverageStart = analysisStartMs >= 0 ? analysisStartMs : 0;
+                long coverageEnd = analysisEndMs >= 0 ? analysisEndMs : durationMs;
+                if (!rules.isEmpty() && !isCoveredFrom(coverage, coverageStart,
+                        coverageEnd)) {
+                    long startMs = analysisStartMs >= 0 && firstUncovered(coverageStart, coverageEnd, coverage)
+                            < coverageEnd ? firstUncovered(coverageStart, coverageEnd, coverage)
+                            : chooseWindowStart(positionMs, coverageEnd, coverage);
                     startMs -= startMs % SkipFingerprint.HOP_MS;
-                    analyzeWindow(startMs, Math.min(durationMs, startMs + WINDOW_MS));
+                    analyzeWindow(startMs, Math.min(coverageEnd, startMs + WINDOW_MS));
                     checkCancelled();
                     if (callback == null && reusableSource(audioUri)) {
                         try {
@@ -324,8 +359,12 @@ public final class SkipManager {
                         }
                     }
                 }
-                boolean done = rules.isEmpty() || isFullyCovered(coverage, durationMs);
-                SkipAnalysisStatus status = done ? (resolveAll(rules, hits, durationMs, coverage).isEmpty()
+                boolean done = rules.isEmpty() || isCoveredFrom(coverage, coverageStart, coverageEnd);
+                List<SkipOccurrence> occurrences = resolveAll(rules, hits, durationMs, coverage);
+                if (callback != null && !done && !occurrences.isEmpty()) {
+                    done = true;
+                }
+                SkipAnalysisStatus status = done ? (occurrences.isEmpty()
                         ? SkipAnalysisStatus.NO_MATCHES : SkipAnalysisStatus.READY) : SkipAnalysisStatus.ANALYZING;
                 emit(status, null);
                 if (!done && !task.isCancellationRequested()) {
@@ -507,6 +546,21 @@ public final class SkipManager {
         long current = Math.max(0, Math.min(positionMs - 5_000, durationMs - WINDOW_MS));
         long upcoming = firstUncovered(current, durationMs, coverage);
         return upcoming < durationMs ? upcoming : firstUncovered(0, durationMs, coverage);
+    }
+
+    private static boolean isCoveredFrom(List<SkipCoverage> coverage, long startMs, long endMs) {
+        return firstUncovered(startMs, endMs, coverage) >= endMs;
+    }
+
+    private static long testEndPosition(SkipRule rule, long positionMs, long durationMs) {
+        long longestEndSample = 0;
+        for (SkipSample sample : rule.samples) {
+            if (sample.marker == SkipMarker.END) {
+                longestEndSample = Math.max(longestEndSample, sample.durationMs);
+            }
+        }
+        long maximum = rule.maxDurationMs > 0 ? rule.maxDurationMs : 120_000;
+        return Math.min(durationMs, positionMs + maximum + longestEndSample);
     }
 
     private static long firstUncovered(long fromMs, long durationMs, List<SkipCoverage> coverage) {

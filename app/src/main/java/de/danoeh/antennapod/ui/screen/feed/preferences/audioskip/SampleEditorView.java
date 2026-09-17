@@ -7,6 +7,8 @@ import android.media.MediaPlayer;
 import android.net.Uri;
 import android.os.Handler;
 import android.os.Looper;
+import android.text.Editable;
+import android.text.TextWatcher;
 import android.view.LayoutInflater;
 import android.view.MotionEvent;
 import android.view.View;
@@ -24,6 +26,7 @@ import android.widget.Toast;
 
 import androidx.core.util.Consumer;
 
+import com.google.android.material.button.MaterialButton;
 import com.google.android.material.color.MaterialColors;
 
 import java.io.File;
@@ -59,6 +62,9 @@ public final class SampleEditorView extends LinearLayout {
     private final int replaceIndex;
     private final Consumer<SkipSampleResult> onSaved;
     private final Runnable onCancel;
+    private final long preferredEpisodeId;
+    private final String preferredEpisodeUri;
+    private final long preferredPosition;
     private final SkipManager manager;
     private final WaveformView waveformView;
     private final Spinner episodeSpinner;
@@ -69,6 +75,7 @@ public final class SampleEditorView extends LinearLayout {
     private final CheckBox loop;
     private final List<EpisodeInfo> episodes = new ArrayList<>();
     private final Handler previewHandler = new Handler(Looper.getMainLooper());
+    private final Handler inputHandler = new Handler(Looper.getMainLooper());
     private SkipTask waveformTask;
     private SkipTask sampleTask;
     private MediaPlayer mediaPlayer;
@@ -79,9 +86,12 @@ public final class SampleEditorView extends LinearLayout {
     private long selectionStart;
     private long selectionEnd;
     private boolean destroyed;
+    private boolean waveformLoading;
+    private boolean updatingInputs;
     private int fineStep = 100;
 
     public SampleEditorView(Context context, long feedId, SkipRule rule, SkipMarker marker, int replaceIndex,
+                            long preferredEpisodeId, String preferredEpisodeUri, long preferredPosition,
                             Consumer<SkipSampleResult> onSaved, Runnable onCancel) {
         super(context);
         this.feedId = feedId;
@@ -90,6 +100,9 @@ public final class SampleEditorView extends LinearLayout {
         this.replaceIndex = replaceIndex;
         this.onSaved = onSaved;
         this.onCancel = onCancel;
+        this.preferredEpisodeId = preferredEpisodeId;
+        this.preferredEpisodeUri = preferredEpisodeUri;
+        this.preferredPosition = preferredPosition;
         manager = SkipManager.getInstance(context);
         setOrientation(VERTICAL);
         setPadding(dp(16), dp(16), dp(16), dp(24));
@@ -105,7 +118,7 @@ public final class SampleEditorView extends LinearLayout {
             @Override
             public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
                 if (fromUser) {
-                    setWindowStart(progress);
+                    setWindowPosition(progress);
                 }
             }
 
@@ -119,21 +132,28 @@ public final class SampleEditorView extends LinearLayout {
         });
         startLabel = findViewById(R.id.audioSkipSampleStart);
         endLabel = findViewById(R.id.audioSkipSampleEnd);
-        LinearLayout startFine = findViewById(R.id.audioSkipStartFineActions);
-        addFineButton(startFine, R.string.audio_skip_start_back, -1, true);
-        addFineButton(startFine, R.string.audio_skip_start_forward, 1, true);
-        LinearLayout endFine = findViewById(R.id.audioSkipEndFineActions);
-        addFineButton(endFine, R.string.audio_skip_end_back, -1, false);
-        addFineButton(endFine, R.string.audio_skip_end_forward, 1, false);
-        LinearLayout zoom = findViewById(R.id.audioSkipZoomActions);
-        addZoomButton(zoom, R.string.audio_skip_zoom_out, false);
-        addZoomButton(zoom, R.string.audio_skip_zoom_in, true);
+        addFineButton(findViewById(R.id.audioSkipStartBackAction), R.string.audio_skip_start_back, -1, true);
+        addFineButton(findViewById(R.id.audioSkipStartForwardAction), R.string.audio_skip_start_forward, 1, true);
+        addFineButton(findViewById(R.id.audioSkipEndBackAction), R.string.audio_skip_end_back, -1, false);
+        addFineButton(findViewById(R.id.audioSkipEndForwardAction), R.string.audio_skip_end_forward, 1, false);
+        startLabel.addTextChangedListener(new SelectionTextWatcher(true));
+        endLabel.addTextChangedListener(new SelectionTextWatcher(false));
+        addZoomButton(findViewById(R.id.audioSkipZoomOutAction), R.string.audio_skip_zoom_out, false);
+        addZoomButton(findViewById(R.id.audioSkipZoomInAction), R.string.audio_skip_zoom_in, true);
         loop = findViewById(R.id.audioSkipLoopSample);
-        Button play = findViewById(R.id.audioSkipPlaySample);
-        play.setOnClickListener(view -> playPreview(false));
-        Button surrounding = findViewById(R.id.audioSkipPlaySurrounding);
-        surrounding.setOnClickListener(view -> playPreview(true));
-        Button stop = findViewById(R.id.audioSkipStopPreview);
+        MaterialButton play = findViewById(R.id.audioSkipPlaySample);
+        play.setText(null);
+        play.setIconResource(R.drawable.ic_play_24dp);
+        play.setIconPadding(0);
+        play.setIconGravity(MaterialButton.ICON_GRAVITY_TEXT_TOP);
+        play.setPadding(0, 0, 0, 0);
+        play.setOnClickListener(view -> playPreview());
+        MaterialButton stop = findViewById(R.id.audioSkipStopPreview);
+        stop.setText(null);
+        stop.setIconResource(R.drawable.ic_stop);
+        stop.setIconPadding(0);
+        stop.setIconGravity(MaterialButton.ICON_GRAVITY_TEXT_TOP);
+        stop.setPadding(0, 0, 0, 0);
         stop.setOnClickListener(view -> stopPreview());
         Button cancel = findViewById(R.id.audioSkipCancelSample);
         cancel.setOnClickListener(view -> onCancel.run());
@@ -153,6 +173,7 @@ public final class SampleEditorView extends LinearLayout {
         }
         stopPreview();
         previewHandler.removeCallbacksAndMessages(null);
+        inputHandler.removeCallbacksAndMessages(null);
         super.onDetachedFromWindow();
     }
 
@@ -178,7 +199,7 @@ public final class SampleEditorView extends LinearLayout {
                         if (duration < 500) {
                             continue;
                         }
-                        result.add(new EpisodeInfo(item.getTitle(), uri, duration));
+                        result.add(new EpisodeInfo(item.getId(), item.getTitle(), uri, duration));
                     }
                     return result;
                 })
@@ -195,11 +216,27 @@ public final class SampleEditorView extends LinearLayout {
                         labels.add(value.title == null ? value.uri.toString() : value.title);
                     }
                     if (labels.isEmpty()) {
-                        status.setText(R.string.audio_skip_no_downloaded_episodes);
+                        setStatus(R.string.audio_skip_no_downloaded_episodes);
                         return;
+                    }
+                    int selected = -1;
+                    for (int index = 0; index < episodes.size(); index++) {
+                        EpisodeInfo value = episodes.get(index);
+                        if (isPreferredEpisode(value)) {
+                            selected = index;
+                            break;
+                        }
                     }
                     episodeSpinner.setAdapter(new ArrayAdapter<>(getContext(),
                             android.R.layout.simple_spinner_dropdown_item, labels));
+                    if (selected < 0 && (preferredEpisodeId >= 0 || preferredEpisodeUri != null)) {
+                        episodeSpinner.setEnabled(false);
+                        setStatus(R.string.audio_skip_download_required);
+                        return;
+                    }
+                    if (selected < 0) {
+                        selected = 0;
+                    }
                     episodeSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
                         @Override
                         public void onItemSelected(AdapterView<?> parent, View view,
@@ -211,10 +248,11 @@ public final class SampleEditorView extends LinearLayout {
                         public void onNothingSelected(AdapterView<?> parent) {
                         }
                     });
-                    selectEpisode(episodes.get(0));
+                    episodeSpinner.setSelection(selected);
+                    selectEpisode(episodes.get(selected));
                 }, error -> {
                     if (!destroyed) {
-                        status.setText(error.getLocalizedMessage());
+                        setStatus(error.getLocalizedMessage());
                     }
                 });
     }
@@ -223,21 +261,40 @@ public final class SampleEditorView extends LinearLayout {
         episode = value;
         episodeDuration = Math.max(1, value.durationMs);
         windowLength = Math.min(30_000, episodeDuration);
-        windowStart = Math.min(windowStart, Math.max(0, episodeDuration - windowLength));
-        selectionStart = windowStart;
-        selectionEnd = Math.min(episodeDuration, selectionStart + Math.min(5_000, windowLength));
-        windowPosition.setMax((int) Math.max(0, episodeDuration - windowLength));
-        windowPosition.setProgress((int) windowStart);
+        if (isPreferredEpisode(value) && preferredPosition >= 0) {
+            long position = Math.min(preferredPosition, episodeDuration);
+            windowStart = Math.max(0, Math.min(position - 20_000, episodeDuration - windowLength));
+            selectionStart = Math.max(windowStart, position - 5_000);
+            selectionEnd = Math.min(episodeDuration, Math.max(selectionStart + 500, position));
+        } else {
+            windowStart = 0;
+            selectionStart = windowStart;
+            selectionEnd = Math.min(episodeDuration, selectionStart + Math.min(5_000, windowLength));
+        }
+        windowPosition.setMax((int) episodeDuration);
+        updateWindowPosition();
         waveformView.setRange(windowStart, windowStart + windowLength, selectionStart, selectionEnd);
+        setSelectionInputs();
         loadWaveform();
     }
 
-    private void setWindowStart(long value) {
-        windowStart = Math.max(0, Math.min(value, Math.max(0, episodeDuration - windowLength)));
-        selectionStart = Math.max(windowStart, Math.min(selectionStart, windowStart + windowLength - 500));
-        selectionEnd = Math.max(selectionStart + 500, Math.min(selectionEnd, windowStart + windowLength));
+    private void setWindowPosition(long value) {
+        long selectionLength = selectionEnd - selectionStart;
+        windowStart = Math.max(0, Math.min(value - windowLength / 2,
+                Math.max(0, episodeDuration - windowLength)));
+        selectionStart = Math.max(0, Math.min(value - selectionLength / 2,
+                episodeDuration - selectionLength));
+        selectionEnd = selectionStart + selectionLength;
         waveformView.setRange(windowStart, windowStart + windowLength, selectionStart, selectionEnd);
+        setSelectionInputs();
+        if (mediaPlayer != null) {
+            stopPreview();
+        }
         loadWaveform();
+    }
+
+    private void updateWindowPosition() {
+        windowPosition.setProgress((int) (windowStart + windowLength / 2));
     }
 
     private void loadWaveform() {
@@ -247,7 +304,9 @@ public final class SampleEditorView extends LinearLayout {
         if (waveformTask != null) {
             waveformTask.cancel();
         }
-        status.setText(R.string.audio_skip_waveform_loading);
+        waveformView.setWaveform(null);
+        waveformLoading = true;
+        setStatus(R.string.audio_skip_waveform_loading);
         waveformTask = manager.extractWaveform(episode.uri, windowStart,
                 Math.min(episodeDuration, windowStart + windowLength), 300,
                 new SkipWaveformCallback() {
@@ -257,8 +316,9 @@ public final class SampleEditorView extends LinearLayout {
                             if (destroyed) {
                                 return;
                             }
+                            waveformLoading = false;
                             waveformView.setWaveform(waveform);
-                            status.setText("");
+                            setStatus("");
                         });
                     }
 
@@ -266,17 +326,31 @@ public final class SampleEditorView extends LinearLayout {
                     public void onError(Throwable error) {
                         post(() -> {
                             if (!destroyed) {
-                                status.setText(R.string.audio_skip_waveform_unavailable);
+                                waveformLoading = false;
+                                setStatus(R.string.audio_skip_waveform_unavailable);
                             }
                         });
                     }
                 });
     }
 
+    private boolean isPreferredEpisode(EpisodeInfo value) {
+        return value.id == preferredEpisodeId
+                || (preferredEpisodeUri != null
+                && (preferredEpisodeUri.equals(value.uri.toString())
+                || value.uri.equals(Uri.fromFile(new File(preferredEpisodeUri)))));
+    }
+
     private void addFineButton(LinearLayout parent, int title, int direction, boolean start) {
-        Button value = (Button) LayoutInflater.from(getContext()).inflate(
+        MaterialButton value = (MaterialButton) LayoutInflater.from(getContext()).inflate(
                 R.layout.audio_skip_text_button, parent, false);
-        value.setText(title);
+        value.setText(null);
+        value.setIconResource(direction < 0 ? R.drawable.ic_fast_rewind : R.drawable.ic_fast_forward);
+        value.setIconPadding(0);
+        value.setIconGravity(MaterialButton.ICON_GRAVITY_TEXT_TOP);
+        value.setPadding(0, 0, 0, 0);
+        value.setMinWidth(0);
+        value.setMinimumWidth(0);
         value.setContentDescription(getContext().getString(title));
         value.setOnClickListener(view -> {
             if (!syncSelectionFromInputs()) {
@@ -284,21 +358,26 @@ public final class SampleEditorView extends LinearLayout {
             }
             long delta = direction * fineStep;
             if (start) {
-                selectionStart = Math.max(windowStart,
+                selectionStart = Math.max(Math.max(0, selectionEnd - 30_000),
                         Math.min(selectionEnd - 500, selectionStart + delta));
             } else {
                 selectionEnd = Math.max(selectionStart + 500,
-                        Math.min(windowStart + windowLength, selectionEnd + delta));
+                        Math.min(Math.min(episodeDuration, selectionStart + 30_000), selectionEnd + delta));
             }
-            updateSelection();
+            if (mediaPlayer != null) {
+                stopPreview();
+            }
+            setSelectionInputs();
+            updateWindowForSelection();
         });
-        parent.addView(value, new LinearLayout.LayoutParams(0, -2, 1));
+        parent.addView(value, new LinearLayout.LayoutParams(dp(40), dp(48)));
     }
 
     private void addZoomButton(LinearLayout parent, int title, boolean in) {
-        Button value = (Button) LayoutInflater.from(getContext()).inflate(
+        MaterialButton value = (MaterialButton) LayoutInflater.from(getContext()).inflate(
                 R.layout.audio_skip_text_button, parent, false);
         value.setText(title);
+        value.setContentDescription(getContext().getString(title));
         value.setOnClickListener(view -> {
             if (!syncSelectionFromInputs()) {
                 return;
@@ -310,18 +389,43 @@ public final class SampleEditorView extends LinearLayout {
             windowLength = Math.min(windowLength, episodeDuration);
             windowStart = Math.max(0, Math.min(center - windowLength / 2,
                     episodeDuration - windowLength));
-            windowPosition.setMax((int) Math.max(0, episodeDuration - windowLength));
-            windowPosition.setProgress((int) windowStart);
+            windowPosition.setMax((int) episodeDuration);
+            updateWindowPosition();
             updateSelection();
             loadWaveform();
         });
-        parent.addView(value, new LinearLayout.LayoutParams(0, -2, 1));
+        parent.addView(value, new LinearLayout.LayoutParams(-2, -2));
     }
 
     private void updateSelection() {
         waveformView.setRange(windowStart, windowStart + windowLength, selectionStart, selectionEnd);
+        setSelectionInputs();
+    }
+
+    private void setSelectionInputs() {
+        updatingInputs = true;
         startLabel.setText(AudioSkipRulesActivity.formatTime(selectionStart));
         endLabel.setText(AudioSkipRulesActivity.formatTime(selectionEnd));
+        updatingInputs = false;
+    }
+
+    private void updateWindowForSelection() {
+        boolean reloadWaveform = selectionStart < windowStart || selectionEnd > windowStart + windowLength;
+        if (!waveformLoading) {
+            setStatus("");
+        }
+        if (reloadWaveform) {
+            windowLength = Math.max(windowLength, selectionEnd - selectionStart);
+            windowLength = Math.min(30_000, Math.min(windowLength, episodeDuration));
+            windowStart = Math.max(0, Math.min(selectionStart - (windowLength - selectionEnd + selectionStart) / 2,
+                    episodeDuration - windowLength));
+            windowPosition.setMax((int) episodeDuration);
+            updateWindowPosition();
+        }
+        waveformView.setRange(windowStart, windowStart + windowLength, selectionStart, selectionEnd);
+        if (reloadWaveform) {
+            loadWaveform();
+        }
     }
 
     private void saveSample() {
@@ -335,9 +439,9 @@ public final class SampleEditorView extends LinearLayout {
         if (sampleTask != null) {
             sampleTask.cancel();
         }
-        status.setText(R.string.audio_skip_waveform_loading);
+        setStatus(R.string.audio_skip_waveform_loading);
         sampleTask = manager.extractSample(String.valueOf(feedId), String.valueOf(episode.uri), episode.uri,
-                marker, selectionStart, selectionEnd, 0,
+                marker, selectionStart, selectionEnd, 0, selectionStart,
                 new SkipSampleCallback() {
                     @Override
                     public void onSuccess(SkipSample sample) {
@@ -352,14 +456,14 @@ public final class SampleEditorView extends LinearLayout {
                     public void onError(Throwable error) {
                         post(() -> {
                             if (!destroyed) {
-                                status.setText(R.string.audio_skip_sample_weak);
+                                setStatus(R.string.audio_skip_sample_weak);
                             }
                         });
                     }
                 });
     }
 
-    private void playPreview(boolean surrounding) {
+    private void playPreview() {
         if (!syncSelectionFromInputs()) {
             return;
         }
@@ -372,8 +476,8 @@ public final class SampleEditorView extends LinearLayout {
         try {
             mediaPlayer = new MediaPlayer();
             mediaPlayer.setDataSource(getContext(), episode.uri);
-            final long start = surrounding ? Math.max(0, selectionStart - 5_000) : selectionStart;
-            final long end = surrounding ? Math.min(episodeDuration, selectionEnd + 5_000) : selectionEnd;
+            final long start = selectionStart;
+            final long end = selectionEnd;
             mediaPlayer.setOnPreparedListener(player -> {
                 if (destroyed) {
                     stopPreview();
@@ -381,10 +485,10 @@ public final class SampleEditorView extends LinearLayout {
                 }
                 player.seekTo((int) start);
                 player.start();
-                schedulePreviewStop(surrounding);
+                schedulePreviewStop();
             });
             mediaPlayer.setOnCompletionListener(player -> {
-                if (loop.isChecked() && !surrounding && !destroyed) {
+                if (loop.isChecked() && !destroyed) {
                     player.seekTo((int) selectionStart);
                     player.start();
                 } else {
@@ -421,20 +525,20 @@ public final class SampleEditorView extends LinearLayout {
         }
     }
 
-    private void schedulePreviewStop(boolean surrounding) {
+    private void schedulePreviewStop() {
         previewHandler.postDelayed(() -> {
             if (mediaPlayer == null || destroyed) {
                 return;
             }
-            long end = surrounding ? Math.min(episodeDuration, selectionEnd + 5_000) : selectionEnd;
+            long end = selectionEnd;
             if (mediaPlayer.getCurrentPosition() < end) {
-                schedulePreviewStop(surrounding);
+                schedulePreviewStop();
                 return;
             }
-            if (loop.isChecked() && !surrounding) {
+            if (loop.isChecked()) {
                 mediaPlayer.seekTo((int) selectionStart);
                 mediaPlayer.start();
-                schedulePreviewStop(false);
+                schedulePreviewStop();
             } else {
                 stopPreview();
             }
@@ -442,21 +546,87 @@ public final class SampleEditorView extends LinearLayout {
     }
 
     private boolean syncSelectionFromInputs() {
+        inputHandler.removeCallbacksAndMessages(null);
         long start = AudioSkipRulesActivity.parseDuration(startLabel.getText().toString());
         long end = AudioSkipRulesActivity.parseDuration(endLabel.getText().toString());
         if (start < 0 || end <= start || end - start < 500 || end - start > 30_000
-                || episode == null || end > episodeDuration
-                || start < windowStart || end > windowStart + windowLength) {
-            status.setText(R.string.audio_skip_validation_timestamp);
+                || episode == null || end > episodeDuration) {
+            setStatus(R.string.audio_skip_validation_timestamp);
             return false;
         }
         selectionStart = start;
         selectionEnd = end;
+        updateWindowForSelection();
         return true;
+    }
+
+    private final class SelectionTextWatcher implements TextWatcher {
+        private final boolean start;
+
+        SelectionTextWatcher(boolean start) {
+            this.start = start;
+        }
+
+        @Override
+        public void beforeTextChanged(CharSequence value, int startIndex, int count, int after) {
+        }
+
+        @Override
+        public void onTextChanged(CharSequence value, int startIndex, int before, int count) {
+        }
+
+        @Override
+        public void afterTextChanged(Editable value) {
+            if (updatingInputs || episode == null) {
+                return;
+            }
+            inputHandler.removeCallbacksAndMessages(null);
+            if (value.toString().trim().isEmpty()) {
+                return;
+            }
+            inputHandler.postDelayed(() -> updateSelectionFromInputs(start), 300);
+        }
+    }
+
+    private void updateSelectionFromInputs(boolean editedStart) {
+        long previousStart = selectionStart;
+        long previousEnd = selectionEnd;
+        long start = AudioSkipRulesActivity.parseDuration(startLabel.getText().toString());
+        long end = AudioSkipRulesActivity.parseDuration(endLabel.getText().toString());
+        if (start < 0 || end < 0 || start > episodeDuration || end > episodeDuration) {
+            return;
+        }
+        if (end - start >= 500 && end - start <= 30_000) {
+            selectionStart = start;
+            selectionEnd = end;
+        } else if (editedStart) {
+            long duration = selectionEnd - selectionStart;
+            if (start + 500 > episodeDuration) {
+                return;
+            }
+            selectionStart = start;
+            selectionEnd = Math.min(episodeDuration, start + duration);
+            setSelectionInputs();
+        } else {
+            return;
+        }
+        if (mediaPlayer != null && (selectionStart != previousStart || selectionEnd != previousEnd)) {
+            stopPreview();
+        }
+        updateWindowForSelection();
     }
 
     private int dp(int value) {
         return (int) (value * getResources().getDisplayMetrics().density + 0.5f);
+    }
+
+    private void setStatus(int value) {
+        setStatus(getContext().getString(value));
+    }
+
+    private void setStatus(CharSequence value) {
+        status.setText(value);
+        status.setVisibility(value == null || value.length() == 0 ? GONE : VISIBLE);
     }
 
     public static void findEpisode(Context context, long feedId, Consumer<EpisodeInfo> callback) {
@@ -480,7 +650,7 @@ public final class SampleEditorView extends LinearLayout {
                                     ? Uri.parse(media.getLocalFileUrl())
                                     : Uri.fromFile(new File(media.getLocalFileUrl()));
                             if (media.getDuration() >= 500) {
-                                result.add(new EpisodeInfo(item.getTitle(), uri, media.getDuration()));
+                                result.add(new EpisodeInfo(item.getId(), item.getTitle(), uri, media.getDuration()));
                             }
                         }
                     }
@@ -492,11 +662,13 @@ public final class SampleEditorView extends LinearLayout {
     }
 
     public static final class EpisodeInfo {
+        public final long id;
         public final String title;
         public final Uri uri;
         public final long durationMs;
 
-        EpisodeInfo(String title, Uri uri, long durationMs) {
+        EpisodeInfo(long id, String title, Uri uri, long durationMs) {
+            this.id = id;
             this.title = title;
             this.uri = uri;
             this.durationMs = durationMs;
@@ -523,6 +695,7 @@ public final class SampleEditorView extends LinearLayout {
         private long start;
         private long end;
         private int handle;
+        private float lastX;
 
         WaveformView(Context context) {
             super(context);
@@ -543,8 +716,6 @@ public final class SampleEditorView extends LinearLayout {
             this.start = start;
             this.end = end;
             invalidate();
-            startLabel.setText(AudioSkipRulesActivity.formatTime(start));
-            endLabel.setText(AudioSkipRulesActivity.formatTime(end));
         }
 
         @Override
@@ -576,7 +747,22 @@ public final class SampleEditorView extends LinearLayout {
             float x = Math.max(0, Math.min(getWidth(), event.getX()));
             long value = rangeStart + (long) ((rangeEnd - rangeStart) * x / getWidth());
             if (event.getAction() == MotionEvent.ACTION_DOWN) {
-                handle = Math.abs(value - start) <= Math.abs(value - end) ? 1 : 2;
+                float startX = xFor(start);
+                float endX = xFor(end);
+                boolean startHit = startX >= 0 && startX <= getWidth()
+                        && Math.abs(event.getX() - startX) < dp(24);
+                boolean endHit = endX >= 0 && endX <= getWidth()
+                        && Math.abs(event.getX() - endX) < dp(24);
+                if (startHit && endHit) {
+                    handle = Math.abs(event.getX() - startX) <= Math.abs(event.getX() - endX) ? 1 : 2;
+                } else if (startHit) {
+                    handle = 1;
+                } else if (endHit) {
+                    handle = 2;
+                } else {
+                    handle = 3;
+                    lastX = event.getX();
+                }
                 return true;
             }
             if (event.getAction() == MotionEvent.ACTION_MOVE) {
@@ -584,12 +770,35 @@ public final class SampleEditorView extends LinearLayout {
                     selectionStart = Math.max(windowStart, Math.min(selectionEnd - 500, value));
                 } else if (handle == 2) {
                     selectionEnd = Math.min(windowStart + windowLength, Math.max(selectionStart + 500, value));
+                } else if (handle == 3) {
+                    long delta = (long) ((event.getX() - lastX) * (rangeEnd - rangeStart) / getWidth());
+                    windowStart = Math.max(0, Math.min(windowStart - delta,
+                            episodeDuration - windowLength));
+                    lastX = event.getX();
+                    updateWindowPosition();
+                    waveform = null;
                 }
-                updateSelection();
+                if (handle != 3) {
+                    updateSelection();
+                } else {
+                    waveformView.setRange(windowStart, windowStart + windowLength,
+                            selectionStart, selectionEnd);
+                }
                 return true;
             }
             if (event.getAction() == MotionEvent.ACTION_UP) {
+                if (handle == 3) {
+                    loadWaveform();
+                }
+                handle = 0;
                 return performClick();
+            }
+            if (event.getAction() == MotionEvent.ACTION_CANCEL) {
+                if (handle == 3) {
+                    loadWaveform();
+                }
+                handle = 0;
+                return true;
             }
             return true;
         }

@@ -28,13 +28,14 @@ public class SkipStorageTest {
         int[] hashes = new int[61];
         Arrays.fill(hashes, 0x456789ab);
         AudioFingerprint fingerprint = new AudioFingerprint(8_000, 64, 32, hashes);
-        SkipSample sample = new SkipSample("sample", SkipMarker.START, 2_000, 0, fingerprint);
+        SkipSample sample = new SkipSample("sample", SkipMarker.START, 2_000, 0, 42_000, fingerprint);
         SkipRule rule = new SkipRule("rule", "Intro", true, SkipRule.Type.FIXED, 0, 0,
                 SkipRule.MissingEndBehavior.UNTOUCHED, 0, 5_000, 0, 0, Collections.singletonList(sample));
         store.write(feedId, new SkipRuleStore.RuleSet(7, Collections.singletonList(rule)));
         SkipRuleStore.RuleSet restored = new SkipRuleStore(context).read(feedId);
         assertEquals(7, restored.revision);
         assertEquals(fingerprint, restored.rules.get(0).samples.get(0).fingerprint);
+        assertEquals(42_000, restored.rules.get(0).samples.get(0).sourcePositionMs);
         assertEquals("Intro", restored.rules.get(0).name);
     }
 

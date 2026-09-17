@@ -89,6 +89,9 @@ final class SkipRuleStore {
             sampleObject.put("marker", sample.marker.name());
             sampleObject.put("durationMs", sample.durationMs);
             sampleObject.put("markerOffsetMs", sample.markerOffsetMs);
+            if (sample.sourcePositionMs >= 0) {
+                sampleObject.put("sourcePositionMs", sample.sourcePositionMs);
+            }
             sampleObject.put("sampleRate", sample.fingerprint.sampleRate);
             sampleObject.put("frameMs", sample.fingerprint.frameMs);
             sampleObject.put("hopMs", sample.fingerprint.hopMs);
@@ -116,7 +119,8 @@ final class SkipRuleStore {
                 }
                 parsedSamples.add(new SkipSample(sample.getString("id"),
                         SkipMarker.valueOf(sample.getString("marker")), sample.getLong("durationMs"),
-                        sample.optLong("markerOffsetMs", 0), new AudioFingerprint(
+                        sample.optLong("markerOffsetMs", 0), sample.optLong("sourcePositionMs", -1),
+                        new AudioFingerprint(
                         sample.getInt("sampleRate"), sample.getInt("frameMs"),
                         sample.getInt("hopMs"), parsedHashes)));
             }

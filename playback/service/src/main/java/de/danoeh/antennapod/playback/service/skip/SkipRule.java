@@ -43,7 +43,7 @@ public final class SkipRule {
                     long maxDurationMs, MissingEndBehavior missingEndBehavior,
                     long missingEndDurationMs, long fixedDurationMs, long firstRegionMs,
                     long lastRegionMs, List<SkipSample> samples) {
-        if (id == null || id.isEmpty() || name == null || name.isEmpty() || type == null
+        if (id == null || id.isEmpty() || name == null || type == null
                 || missingEndBehavior == null || minDurationMs < 0 || maxDurationMs < 0
                 || missingEndDurationMs < 0 || fixedDurationMs < 0 || firstRegionMs < 0
                 || lastRegionMs < 0
