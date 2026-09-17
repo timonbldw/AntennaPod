@@ -26,11 +26,17 @@ public final class SkipAudioClip implements AutoCloseable {
 
     public static SkipAudioClip create(Context context, Uri syntheticUri, long startMs, long endMs)
             throws IOException, InterruptedException {
+        return create(context, syntheticUri, startMs, endMs, false);
+    }
+
+    public static SkipAudioClip create(Context context, Uri syntheticUri, long startMs, long endMs,
+                                       boolean fetchMissing) throws IOException, InterruptedException {
         if (!SkipStreamingSource.isStreaming(syntheticUri)
                 || startMs < 0 || endMs <= startMs || endMs - startMs > MAX_DURATION_MS) {
             throw new IllegalArgumentException("Invalid clip source or range");
         }
-        SkipAudioDecoder.DecodedAudio audio = SkipAudioDecoder.decode(context, syntheticUri, startMs, endMs);
+        SkipAudioDecoder.DecodedAudio audio = SkipAudioDecoder.decode(
+                context, syntheticUri, startMs, endMs, fetchMissing);
         int expectedSamples = (int) ((endMs - startMs) * SAMPLE_RATE / 1_000);
         if (!audio.complete || audio.startMs != startMs || audio.samples.length < expectedSamples) {
             throw new SkipStreamingSource.UnavailableException("Requested clip is not fully cached");
