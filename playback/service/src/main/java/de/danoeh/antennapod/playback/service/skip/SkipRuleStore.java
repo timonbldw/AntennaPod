@@ -82,6 +82,9 @@ final class SkipRuleStore {
         object.put("fixedDurationMs", rule.fixedDurationMs);
         object.put("firstRegionMs", rule.firstRegionMs);
         object.put("lastRegionMs", rule.lastRegionMs);
+        if (rule.useStartAsEnd) {
+            object.put("useStartAsEnd", true);
+        }
         JSONArray samples = new JSONArray();
         for (SkipSample sample : rule.samples) {
             JSONObject sampleObject = new JSONObject();
@@ -132,7 +135,7 @@ final class SkipRuleStore {
                         SkipRule.MissingEndBehavior.UNTOUCHED.name())),
                 object.optLong("missingEndDurationMs", 0), object.optLong("fixedDurationMs",
                         object.optLong("missingEndDurationMs", 0)), object.optLong("firstRegionMs", 0),
-                object.optLong("lastRegionMs", 0), parsedSamples);
+                object.optLong("lastRegionMs", 0), object.optBoolean("useStartAsEnd", false), parsedSamples);
     }
 
     private File fileFor(String feedId) {

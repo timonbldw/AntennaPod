@@ -33,7 +33,9 @@ import de.danoeh.antennapod.playback.cast.CastStateListener;
 import de.danoeh.antennapod.playback.service.PlaybackController;
 import de.danoeh.antennapod.playback.service.skip.SkipAnalysisSnapshot;
 import de.danoeh.antennapod.playback.service.skip.SkipAnalysisStatus;
+import de.danoeh.antennapod.playback.service.skip.SkipDetection;
 import de.danoeh.antennapod.playback.service.skip.SkipManager;
+import de.danoeh.antennapod.playback.service.skip.SkipMarker;
 import de.danoeh.antennapod.playback.service.skip.SkipOccurrence;
 import de.danoeh.antennapod.playback.service.skip.SkipRule;
 import de.danoeh.antennapod.playback.service.skip.SkipStreamingSource;
@@ -224,22 +226,28 @@ public class ChaptersFragment extends AppCompatDialogFragment {
         } else if (snapshot.status == SkipAnalysisStatus.WAITING_FOR_AUDIO) {
             status = getString(R.string.audio_skip_playback_waiting_for_audio);
         } else if (snapshot.status == SkipAnalysisStatus.WINDOW_READY) {
-            status = getString(R.string.audio_skip_playback_window_ready, snapshot.occurrences.size());
+            status = snapshot.occurrences.isEmpty() && !snapshot.detections.isEmpty()
+                    ? getString(R.string.audio_skip_playback_diagnostics_only,
+                    snapshot.detections.size())
+                    : getString(R.string.audio_skip_playback_window_ready, snapshot.occurrences.size());
         } else if (snapshot.status == SkipAnalysisStatus.DOWNLOAD_REQUIRED) {
             status = getString(R.string.audio_skip_playback_download_required);
         } else if (snapshot.status == SkipAnalysisStatus.READY) {
-            status = getString(R.string.audio_skip_playback_ready, snapshot.occurrences.size());
+            status = snapshot.occurrences.isEmpty()
+                    ? getString(R.string.audio_skip_playback_diagnostics_only,
+                    snapshot.detections.size())
+                    : getString(R.string.audio_skip_playback_ready, snapshot.occurrences.size());
         } else if (snapshot.status == SkipAnalysisStatus.NO_MATCHES) {
-            status = getString(R.string.audio_skip_playback_no_matches);
+            status = snapshot.detections.isEmpty()
+                    ? getString(R.string.audio_skip_playback_no_matches)
+                    : getString(R.string.audio_skip_playback_diagnostics_only,
+                    snapshot.detections.size());
         } else if (snapshot.status == SkipAnalysisStatus.ERROR) {
             status = getString(R.string.audio_skip_playback_error);
         } else {
             status = getString(R.string.audio_skip_playback_not_analyzed);
         }
         skipAnalysisStatus.setText(status);
-        if (snapshot.occurrences.isEmpty()) {
-            return;
-        }
         List<SkipRule> rules = skipFeedId == null ? Collections.emptyList()
                 : SkipManager.getInstance(requireContext()).getRules(skipFeedId);
         for (SkipOccurrence occurrence : snapshot.occurrences) {
@@ -263,6 +271,51 @@ public class ChaptersFragment extends AppCompatDialogFragment {
             listen.setOnClickListener(v -> seekTo(occurrence.startMs, true));
             jump.setOnClickListener(v -> seekTo(occurrence.endMs, false));
             skipAnalysisRows.addView(row);
+        }
+        for (SkipDetection detection : snapshot.detections) {
+            View row = getLayoutInflater().inflate(R.layout.skip_analysis_diagnostic_row,
+                    skipAnalysisRows, false);
+            TextView rule = row.findViewById(R.id.skipAnalysisDiagnosticRule);
+            TextView details = row.findViewById(R.id.skipAnalysisDiagnosticDetails);
+            String ruleName = detection.ruleId;
+            for (SkipRule candidate : rules) {
+                if (candidate.id.equals(detection.ruleId)) {
+                    ruleName = candidate.name;
+                    break;
+                }
+            }
+            String time = formatTime(detection.timeMs);
+            String role = detection.marker == SkipMarker.START
+                    ? getString(R.string.audio_skip_playback_start_marker)
+                    : getString(R.string.audio_skip_playback_end_marker);
+            String reason = getString(diagnosticReason(detection.reason));
+            rule.setText(getString(R.string.audio_skip_playback_rule, ruleName));
+            details.setText(detection.reason == SkipDetection.Reason.FALLBACK
+                    ? getString(R.string.audio_skip_playback_diagnostic_fallback, time,
+                    formatTime(detection.endMs), role, reason)
+                    : getString(R.string.audio_skip_playback_diagnostic, time, role, reason));
+            row.setContentDescription(details.getText());
+            skipAnalysisRows.addView(row);
+        }
+    }
+
+    private int diagnosticReason(SkipDetection.Reason reason) {
+        switch (reason) {
+            case MISSING_END:
+                return R.string.audio_skip_playback_reason_missing_end;
+            case MISSING_START:
+                return R.string.audio_skip_playback_reason_missing_start;
+            case TOO_SHORT:
+                return R.string.audio_skip_playback_reason_too_short;
+            case TOO_LONG:
+                return R.string.audio_skip_playback_reason_too_long;
+            case REPLACED_START:
+                return R.string.audio_skip_playback_reason_replaced_start;
+            case FALLBACK:
+                return R.string.audio_skip_playback_reason_fallback;
+            case PENDING:
+            default:
+                return R.string.audio_skip_playback_reason_pending;
         }
     }
 
