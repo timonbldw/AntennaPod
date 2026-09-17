@@ -36,6 +36,7 @@ import de.danoeh.antennapod.playback.service.skip.SkipAnalysisStatus;
 import de.danoeh.antennapod.playback.service.skip.SkipManager;
 import de.danoeh.antennapod.playback.service.skip.SkipOccurrence;
 import de.danoeh.antennapod.playback.service.skip.SkipRule;
+import de.danoeh.antennapod.playback.service.skip.SkipStreamingSource;
 import de.danoeh.antennapod.playback.service.skip.SkipSubscription;
 import de.danoeh.antennapod.storage.database.DBReader;
 import de.danoeh.antennapod.storage.preferences.PlaybackPreferences;
@@ -139,19 +140,19 @@ public class ChaptersFragment extends AppCompatDialogFragment {
         }
         final FeedMedia observedMedia = (FeedMedia) media;
         PlaybackController.bindToMedia3Service(getActivity(), controller -> {
-            boolean localPlayback = isCurrentLocalPlayback(controller, observedMedia);
+            Uri sourceUri = getCurrentSkipSource(controller, observedMedia);
             if (getActivity() != null) {
                 getActivity().runOnUiThread(() -> {
                     if (!isAdded() || skipAnalysisRows == null || generation != skipSourceGeneration
                             || this.media != observedMedia) {
                         return;
                     }
-                    if (!localPlayback) {
+                    if (sourceUri == null) {
                         skipAnalysisRows.removeAllViews();
                         skipAnalysisStatus.setText(R.string.audio_skip_playback_no_audio);
                         return;
                     }
-                    observeSkipSnapshot(generation, observedMedia);
+                    observeSkipSnapshot(generation, observedMedia, sourceUri);
                 });
             }
         });
@@ -170,9 +171,27 @@ public class ChaptersFragment extends AppCompatDialogFragment {
                 && Uri.parse(media.getLocalFileUrl()).equals(item.localConfiguration.uri);
     }
 
-    private void observeSkipSnapshot(int generation, FeedMedia media) {
+    private Uri getCurrentSkipSource(MediaController controller, FeedMedia media) {
+        if (controller.getDeviceInfo().playbackType == DeviceInfo.PLAYBACK_TYPE_REMOTE) {
+            return null;
+        }
+        MediaItem item = controller.getCurrentMediaItem();
+        if (item == null || item.localConfiguration == null || !String.valueOf(media.getId()).equals(item.mediaId)) {
+            return null;
+        }
+        if (isCurrentLocalPlayback(controller, media)) {
+            return Uri.parse(media.getLocalFileUrl());
+        }
+        Uri source = SkipStreamingSource.getSource(item.localConfiguration.uri);
+        return source != null && SkipStreamingSource.isAvailable(source) ? source : null;
+    }
+
+    private void observeSkipSnapshot(int generation, FeedMedia media, Uri sourceUri) {
         SkipManager manager = SkipManager.getInstance(requireContext());
-        displaySkipAnalysis(manager.getSnapshot(skipFeedId, skipEpisodeId));
+        SkipAnalysisSnapshot initialSnapshot = manager.getSnapshot(skipFeedId, skipEpisodeId);
+        if (matchesSource(initialSnapshot, sourceUri)) {
+            displaySkipAnalysis(initialSnapshot);
+        }
         final String observedFeedId = skipFeedId;
         final String observedEpisodeId = skipEpisodeId;
         skipSubscription = manager.observe(skipFeedId, skipEpisodeId, snapshot -> {
@@ -180,12 +199,18 @@ public class ChaptersFragment extends AppCompatDialogFragment {
                 getActivity().runOnUiThread(() -> {
                     if (isAdded() && skipAnalysisRows != null && generation == skipSourceGeneration
                             && this.media == media && observedFeedId.equals(snapshot.feedId)
-                            && observedEpisodeId.equals(snapshot.episodeId)) {
+                            && observedEpisodeId.equals(snapshot.episodeId) && matchesSource(snapshot, sourceUri)) {
                         displaySkipAnalysis(snapshot);
                     }
                 });
             }
         });
+    }
+
+    private boolean matchesSource(SkipAnalysisSnapshot snapshot, Uri sourceUri) {
+        return snapshot.status == SkipAnalysisStatus.NOT_ANALYZED
+                || !SkipStreamingSource.isStreaming(sourceUri)
+                || sourceUri.toString().equals(snapshot.sourceIdentity);
     }
 
     private void displaySkipAnalysis(SkipAnalysisSnapshot snapshot) {
@@ -196,6 +221,12 @@ public class ChaptersFragment extends AppCompatDialogFragment {
         String status;
         if (snapshot.status == SkipAnalysisStatus.ANALYZING) {
             status = getString(R.string.audio_skip_playback_analyzing);
+        } else if (snapshot.status == SkipAnalysisStatus.WAITING_FOR_AUDIO) {
+            status = getString(R.string.audio_skip_playback_waiting_for_audio);
+        } else if (snapshot.status == SkipAnalysisStatus.WINDOW_READY) {
+            status = getString(R.string.audio_skip_playback_window_ready, snapshot.occurrences.size());
+        } else if (snapshot.status == SkipAnalysisStatus.DOWNLOAD_REQUIRED) {
+            status = getString(R.string.audio_skip_playback_download_required);
         } else if (snapshot.status == SkipAnalysisStatus.READY) {
             status = getString(R.string.audio_skip_playback_ready, snapshot.occurrences.size());
         } else if (snapshot.status == SkipAnalysisStatus.NO_MATCHES) {

@@ -27,10 +27,14 @@ final class SkipAudioDecoder {
             throw new IllegalArgumentException("Invalid decode range");
         }
         MediaExtractor extractor = new MediaExtractor();
+        SkipStreamingSource.CachedMediaDataSource streamingSource = null;
         MediaCodec codec = null;
         boolean started = false;
         try {
-            if (uri.getScheme() == null || "file".equals(uri.getScheme())) {
+            if (SkipStreamingSource.isStreaming(uri)) {
+                streamingSource = SkipStreamingSource.open(uri);
+                extractor.setDataSource(streamingSource);
+            } else if (uri.getScheme() == null || "file".equals(uri.getScheme())) {
                 extractor.setDataSource(uri.getPath());
             } else {
                 extractor.setDataSource(context, uri, Collections.emptyMap());
@@ -45,11 +49,17 @@ final class SkipAudioDecoder {
             if (mime == null) {
                 throw new IOException("Audio MIME type is missing");
             }
+            if (streamingSource != null) {
+                streamingSource.acceptOptionalMp3TailProbe(mime);
+            }
             codec = MediaCodec.createDecoderByType(mime);
             codec.configure(inputFormat, null, null, 0);
             codec.start();
             started = true;
             extractor.seekTo(Math.max(0, startMs - 250) * 1_000, MediaExtractor.SEEK_TO_PREVIOUS_SYNC);
+            if (streamingSource != null) {
+                streamingSource.throwIfUnavailable();
+            }
             PcmAccumulator accumulator = new PcmAccumulator(startMs, endMs);
             MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
             boolean inputEnded = false;
@@ -73,6 +83,9 @@ final class SkipAudioDecoder {
                         }
                         inputBuffer.clear();
                         int size = extractor.readSampleData(inputBuffer, 0);
+                        if (streamingSource != null) {
+                            streamingSource.throwIfUnavailable();
+                        }
                         long timeUs = extractor.getSampleTime();
                         sourceEnded = size < 0 || timeUs < 0;
                         if (sourceEnded || timeUs >= (endMs + 250) * 1_000) {
@@ -135,7 +148,15 @@ final class SkipAudioDecoder {
                     }
                 }
             }
+            if (streamingSource != null) {
+                streamingSource.throwIfUnavailable();
+            }
             return accumulator.result(sourceEnded && outputEnded, previousEndUs);
+        } catch (IOException | RuntimeException e) {
+            if (streamingSource != null) {
+                streamingSource.throwIfUnavailable();
+            }
+            throw e;
         } finally {
             try {
                 if (codec != null) {
@@ -148,7 +169,13 @@ final class SkipAudioDecoder {
                     }
                 }
             } finally {
-                extractor.release();
+                try {
+                    extractor.release();
+                } finally {
+                    if (streamingSource != null) {
+                        streamingSource.close();
+                    }
+                }
             }
         }
     }

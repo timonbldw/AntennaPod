@@ -8,6 +8,9 @@
     <string name="audio_skip_playback_no_matches">No automatic skip sections detected</string>
     <string name="audio_skip_playback_not_analyzed">Automatic skip analysis not started</string>
     <string name="audio_skip_playback_error">Automatic skip analysis unavailable</string>
+    <string name="audio_skip_playback_waiting_for_audio">Waiting for streamed audio</string>
+    <string name="audio_skip_playback_window_ready">Automatic skip sections available in buffered audio (%1$d)</string>
+    <string name="audio_skip_playback_download_required">Download the episode to analyze the remaining audio</string>
     <string name="audio_skip_playback_no_audio">No playable audio source</string>
     <string name="audio_skip_playback_sections_title">Automatic skip sections</string>
     <string name="audio_skip_playback_show_sections">Show detected sections</string>
@@ -1089,6 +1092,9 @@
     <string name="audio_skip_add_rule">Add rule</string>
     <string name="audio_skip_add_rule_short">+ Skip rule</string>
     <string name="audio_skip_download_required">Download required</string>
+    <string name="audio_skip_stream_sample_unavailable">This part is not cached. Play it first or download the episode.</string>
+    <string name="audio_skip_stream_test_download_required">Download the episode to test a rule across the whole episode.</string>
+    <string name="audio_skip_current_streamed_episode">Currently playing episode</string>
     <string name="audio_skip_new_rule">New rule</string>
     <string name="audio_skip_edit_rule">Edit rule</string>
     <string name="audio_skip_rule_name">Rule name</string>
@@ -1116,7 +1122,7 @@
     <string name="audio_skip_last_region">Only search in last</string>
     <string name="audio_skip_search_region_hint">Leave blank for no limit</string>
     <string name="audio_skip_rule_samples">Audio samples</string>
-    <string name="audio_skip_no_samples">Add a downloaded episode sample for each marker variant.</string>
+    <string name="audio_skip_no_samples">Add an episode sample for each marker variant.</string>
     <string name="audio_skip_add_start_sample">Add start sample</string>
     <string name="audio_skip_add_episode_end_marker">Add episode end marker</string>
     <string name="audio_skip_add_end_sample">Add end sample</string>
@@ -1126,7 +1132,7 @@
     <string name="audio_skip_sample_end">End marker</string>
     <string name="audio_skip_sample_episode_end">Episode end marker</string>
     <string name="audio_skip_sample_editor">Audio sample</string>
-    <string name="audio_skip_source_episode">Downloaded episode</string>
+    <string name="audio_skip_source_episode">Episode</string>
     <string name="audio_skip_no_downloaded_episodes">Download an episode from this podcast to create a sample.</string>
     <string name="audio_skip_window_position">Audio position</string>
     <string name="audio_skip_sample_start_time">Sample start</string>

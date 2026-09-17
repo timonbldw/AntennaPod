@@ -66,6 +66,7 @@ import de.danoeh.antennapod.playback.service.skip.SkipPlaybackDecision;
 import de.danoeh.antennapod.playback.service.skip.SkipPriority;
 import de.danoeh.antennapod.playback.service.skip.SkipSubscription;
 import de.danoeh.antennapod.playback.service.skip.SkipTask;
+import de.danoeh.antennapod.playback.service.skip.SkipStreamingSource;
 import de.danoeh.antennapod.storage.database.DBReader;
 import de.danoeh.antennapod.storage.database.DBWriter;
 import de.danoeh.antennapod.storage.preferences.PlaybackPreferences;
@@ -118,6 +119,7 @@ public class Media3PlaybackService extends MediaLibraryService {
     private String skipFeedId;
     private String skipEpisodeId;
     private long skipAnalysisDuration;
+    private Uri skipAnalysisSource;
     private long skipMediaGeneration;
     private long previousSkipPosition = -1;
     private boolean internalSeek;
@@ -189,6 +191,7 @@ public class Media3PlaybackService extends MediaLibraryService {
             @Override
             public void setPlaybackSpeed(float speed) {
                 super.setPlaybackSpeed(speed);
+                updateStreamingSkipPosition(getCurrentPosition(), speed);
                 PlaybackPreferences.setCurrentlyPlayingTemporaryPlaybackSpeed(speed);
                 EventBus.getDefault().post(new SpeedChangedEvent(speed));
             }
@@ -501,6 +504,7 @@ public class Media3PlaybackService extends MediaLibraryService {
                             long duration = player.getDuration();
                             float speed = player.getPlaybackParameters().speed;
                             if (duration > 0) {
+                                updateStreamingSkipPosition(position, speed);
                                 EventBus.getDefault().post(
                                         new PlaybackPositionEvent((int) position, (int) duration));
                                 WidgetUpdater.WidgetState widgetState = new WidgetUpdater.WidgetState(currentPlayable,
@@ -540,22 +544,23 @@ public class Media3PlaybackService extends MediaLibraryService {
     private void startSkipAnalysis(FeedMedia media) {
         long playerDuration = player == null ? 0 : player.getDuration();
         long duration = skipSubscription == null ? getSkipAnalysisDuration(media) : playerDuration;
-        if (!isCurrentLocalPlayback(media) || media.getItem() == null || media.getItem().getFeed() == null
+        Uri audioUri = getCurrentSkipSource(media);
+        if (audioUri == null || media.getItem() == null || media.getItem().getFeed() == null
                 || duration <= 0) {
             return;
         }
         String feedId = String.valueOf(media.getItem().getFeed().getId());
         String episodeId = String.valueOf(media.getItem().getId());
-        Uri audioUri = Uri.parse(media.getLocalFileUrl());
         boolean observingEpisode = skipSubscription != null && feedId.equals(skipFeedId)
                 && episodeId.equals(skipEpisodeId);
-        if (observingEpisode && duration == skipAnalysisDuration) {
+        if (observingEpisode && audioUri.equals(skipAnalysisSource) && duration == skipAnalysisDuration) {
             return;
         }
         long generation = skipMediaGeneration;
         skipFeedId = feedId;
         skipEpisodeId = episodeId;
         skipAnalysisDuration = duration;
+        skipAnalysisSource = audioUri;
         SkipManager manager = SkipManager.getInstance(this);
         skipTask = manager.analyze(feedId, episodeId, audioUri, duration,
                 player.getCurrentPosition(), SkipPriority.CURRENT_PLAYBACK);
@@ -568,7 +573,8 @@ public class Media3PlaybackService extends MediaLibraryService {
     private void restartInvalidatedSkipAnalysis() {
         FeedMedia media = currentPlayable;
         long duration = getSkipAnalysisDuration(media);
-        if (!isCurrentLocalPlayback(media) || media.getItem() == null || media.getItem().getFeed() == null
+        Uri audioUri = getCurrentSkipSource(media);
+        if (audioUri == null || media.getItem() == null || media.getItem().getFeed() == null
                 || duration <= 0) {
             return;
         }
@@ -577,17 +583,22 @@ public class Media3PlaybackService extends MediaLibraryService {
         }
         skipTask = SkipManager.getInstance(this).analyze(
                 String.valueOf(media.getItem().getFeed().getId()), String.valueOf(media.getItem().getId()),
-                Uri.parse(media.getLocalFileUrl()), duration, player.getCurrentPosition(),
+                audioUri, duration, player.getCurrentPosition(),
                 SkipPriority.CURRENT_PLAYBACK);
     }
 
-    private boolean isCurrentLocalPlayback(@Nullable FeedMedia media) {
-        if (media == null || !media.localFileAvailable() || player == null || isCasting()
-                || player.getCurrentMediaItem() == null
-                || player.getCurrentMediaItem().localConfiguration == null) {
-            return false;
+    @Nullable
+    private Uri getCurrentSkipSource(@Nullable FeedMedia media) {
+        if (media == null || player == null || isCasting() || !player.isCurrentMediaItemSeekable()
+                || !matchesMediaItem(media, player.getCurrentMediaItem())
+                || player.getCurrentMediaItem().localConfiguration == null || player.getDuration() <= 0) {
+            return null;
         }
-        return Uri.parse(media.getLocalFileUrl()).equals(player.getCurrentMediaItem().localConfiguration.uri);
+        Uri playbackUri = player.getCurrentMediaItem().localConfiguration.uri;
+        if (media.localFileAvailable() && Uri.parse(media.getLocalFileUrl()).equals(playbackUri)) {
+            return playbackUri;
+        }
+        return SkipStreamingSource.getSource(playbackUri);
     }
 
     private long getSkipAnalysisDuration(@Nullable FeedMedia media) {
@@ -598,20 +609,28 @@ public class Media3PlaybackService extends MediaLibraryService {
     }
 
     private void updateSkipSnapshot(long generation, FeedMedia media, SkipAnalysisSnapshot snapshot) {
-        if (generation != skipMediaGeneration || currentPlayable != media || player == null
-                || !isCurrentLocalPlayback(media)) {
+        if (generation != skipMediaGeneration || currentPlayable != media || !isCurrentPlayableMediaItem()) {
+            return;
+        }
+        if (!matchesSnapshotSource(skipAnalysisSource, snapshot)) {
+            return;
+        }
+        if (snapshot.status == SkipAnalysisStatus.NOT_ANALYZED) {
+            skipOccurrences = Collections.emptyList();
+            SkipPlaybackDecision.updateOccurrences(skipOccurrences, player.getCurrentPosition(), skipDecisionState);
+            restartInvalidatedSkipAnalysis();
+            return;
+        }
+        if (!isCurrentSkipSource(media)) {
             return;
         }
         skipOccurrences = snapshot.occurrences;
         SkipPlaybackDecision.updateOccurrences(skipOccurrences, player.getCurrentPosition(), skipDecisionState);
-        if (snapshot.status == SkipAnalysisStatus.NOT_ANALYZED) {
-            restartInvalidatedSkipAnalysis();
-        }
     }
 
     private void applySkipDecision() {
         if (currentPlayable == null || player == null || !player.isPlaying()
-                || !isCurrentLocalPlayback(currentPlayable)) {
+                || !isCurrentSkipSource(currentPlayable)) {
             return;
         }
         long position = player.getCurrentPosition();
@@ -628,6 +647,7 @@ public class Media3PlaybackService extends MediaLibraryService {
 
     private void handleSeek(long positionMs) {
         previousSkipPosition = positionMs;
+        updateStreamingSkipPosition(positionMs, player.getPlaybackParameters().speed);
         if (!internalSeek && isCurrentPlayableMediaItem()) {
             SkipPlaybackDecision.onUserSeek(skipOccurrences, positionMs, skipDecisionState);
             if (skipFeedId != null && skipEpisodeId != null) {
@@ -635,6 +655,34 @@ public class Media3PlaybackService extends MediaLibraryService {
                         skipFeedId, skipEpisodeId, positionMs, SkipPriority.CURRENT_PLAYBACK);
             }
         }
+    }
+
+    private void updateStreamingSkipPosition(long positionMs, float speed) {
+        if (skipFeedId != null && skipEpisodeId != null) {
+            SkipManager.getInstance(this).updateStreamingPosition(skipFeedId, skipEpisodeId, positionMs, speed);
+        }
+    }
+
+    private boolean isCurrentSkipSource(@Nullable FeedMedia media) {
+        if (skipAnalysisSource == null || media == null || player == null || isCasting()
+                || !player.isCurrentMediaItemSeekable() || !matchesMediaItem(media, player.getCurrentMediaItem())
+                || player.getCurrentMediaItem().localConfiguration == null || player.getDuration() <= 0) {
+            return false;
+        }
+        Uri playbackUri = player.getCurrentMediaItem().localConfiguration.uri;
+        if (SkipStreamingSource.isStreaming(skipAnalysisSource)) {
+            return skipAnalysisSource.equals(SkipStreamingSource.getSource(playbackUri));
+        }
+        return skipAnalysisSource.equals(playbackUri);
+    }
+
+    static boolean matchesMediaItem(@Nullable FeedMedia media, @Nullable MediaItem mediaItem) {
+        return media != null && mediaItem != null && String.valueOf(media.getId()).equals(mediaItem.mediaId);
+    }
+
+    static boolean matchesSnapshotSource(@Nullable Uri source, SkipAnalysisSnapshot snapshot) {
+        return snapshot.status == SkipAnalysisStatus.NOT_ANALYZED || source != null
+                && (!SkipStreamingSource.isStreaming(source) || source.toString().equals(snapshot.sourceIdentity));
     }
 
     private boolean isCurrentPlayableMediaItem() {
@@ -670,6 +718,7 @@ public class Media3PlaybackService extends MediaLibraryService {
         skipFeedId = null;
         skipEpisodeId = null;
         skipAnalysisDuration = 0;
+        skipAnalysisSource = null;
         previousSkipPosition = -1;
     }
 

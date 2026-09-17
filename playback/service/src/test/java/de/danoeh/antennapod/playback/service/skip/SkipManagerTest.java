@@ -45,6 +45,11 @@ public class SkipManagerTest {
         assertInvalidationRestart(Uri.parse("content://skip-tests/disabled-episode"));
     }
 
+    @Test
+    public void streamingRuleInvalidationRestartsWithoutSourceIdentity() throws Exception {
+        assertInvalidationRestart(Uri.parse("skip-cache://skip-tests-disabled-episode"));
+    }
+
     private static void assertInvalidationRestart(Uri source) throws Exception {
         Context context = ApplicationProvider.getApplicationContext();
         SkipManager manager = SkipManager.getInstance(context);

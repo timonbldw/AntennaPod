@@ -11,11 +11,13 @@ import androidx.media3.common.PlaybackException;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.database.StandaloneDatabaseProvider;
 import androidx.media3.datasource.DataSource;
+import androidx.media3.datasource.DataSpec;
 import androidx.media3.datasource.DefaultDataSource;
 import androidx.media3.datasource.DefaultHttpDataSource;
 import androidx.media3.datasource.HttpDataSource;
 import androidx.media3.datasource.ResolvingDataSource;
 import androidx.media3.datasource.cache.CacheDataSource;
+import androidx.media3.datasource.cache.CacheDataSink;
 import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor;
 import androidx.media3.datasource.cache.SimpleCache;
 import de.danoeh.antennapod.net.common.RedirectChecker;
@@ -32,6 +34,7 @@ import de.danoeh.antennapod.net.common.NetworkUtils;
 import de.danoeh.antennapod.net.common.UserAgentInterceptor;
 import de.danoeh.antennapod.playback.base.MediaItemAdapter;
 import de.danoeh.antennapod.playback.service.R;
+import de.danoeh.antennapod.playback.service.skip.SkipStreamingSource;
 import de.danoeh.antennapod.storage.preferences.UserPreferences;
 
 import java.io.File;
@@ -41,6 +44,7 @@ import java.util.concurrent.TimeUnit;
 
 @OptIn(markerClass = UnstableApi.class)
 public class ExoPlayerUtils {
+    private static final long STREAMING_CACHE_FRAGMENT_SIZE = 64 * 1024;
     private static volatile SimpleCache simpleCache;
 
     @OptIn(markerClass = UnstableApi.class)
@@ -71,6 +75,7 @@ public class ExoPlayerUtils {
 
     public static void releaseCache() {
         if (simpleCache != null) {
+            SkipStreamingSource.release(simpleCache);
             simpleCache.release();
             simpleCache = null;
         }
@@ -180,9 +185,18 @@ public class ExoPlayerUtils {
             String uri = mediaItem.localConfiguration != null
                     ? mediaItem.localConfiguration.uri.toString() : "";
             if (uri.startsWith("http")) {
-                return new CacheDataSource.Factory()
+                SkipStreamingSource.Registration source = SkipStreamingSource.register(
+                        simpleCache, mediaItem.localConfiguration.uri);
+                CacheDataSource.Factory cacheFactory = new CacheDataSource.Factory()
                         .setCache(simpleCache)
+                        .setCacheKeyFactory(dataSpec -> source.cacheKey)
+                        .setCacheWriteDataSinkFactory(new CacheDataSink.Factory()
+                                .setCache(simpleCache)
+                                .setFragmentSize(STREAMING_CACHE_FRAGMENT_SIZE))
                         .setUpstreamDataSourceFactory(resolvingFactory);
+                return new ResolvingDataSource.Factory(cacheFactory, dataSpec -> dataSpec.buildUpon()
+                        .setFlags(dataSpec.flags | DataSpec.FLAG_ALLOW_CACHE_FRAGMENTATION)
+                        .build());
             }
             return resolvingFactory;
         }
