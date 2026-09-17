@@ -419,14 +419,16 @@ public final class SkipManager {
                     }
                 }
                 boolean done = rules.isEmpty() || isCoveredFrom(coverage, coverageStart, coverageEnd);
-                List<SkipOccurrence> occurrences = resolveAll(rules, hits, durationMs, coverage);
+                Resolution resolution = resolveAll(rules, hits, durationMs, coverage);
+                List<SkipOccurrence> occurrences = resolution.occurrences;
                 if (callback != null && !done && !occurrences.isEmpty()) {
                     done = true;
                 }
                 boolean streamingPlayback = SkipStreamingSource.isStreaming(audioUri) && callback == null
                         && !rules.isEmpty();
                 SkipAnalysisStatus status = done ? streamingPlayback ? SkipAnalysisStatus.WINDOW_READY
-                        : occurrences.isEmpty() ? SkipAnalysisStatus.NO_MATCHES : SkipAnalysisStatus.READY
+                        : occurrences.isEmpty() && resolution.detections.isEmpty()
+                        ? SkipAnalysisStatus.NO_MATCHES : SkipAnalysisStatus.READY
                         : SkipAnalysisStatus.ANALYZING;
                 emit(status, null);
                 if (!done && !task.isCancellationRequested()) {
@@ -502,9 +504,12 @@ public final class SkipManager {
                     for (SkipSample sample : rule.samples) {
                         if (sample.marker == SkipMarker.START) {
                             startSample = Math.max(startSample, sample.durationMs);
-                        } else {
+                        } else if (!rule.useStartAsEnd) {
                             endSample = Math.max(endSample, sample.durationMs);
                         }
+                    }
+                    if (rule.useStartAsEnd) {
+                        endSample = startSample;
                     }
                     betweenHorizon = Math.max(betweenHorizon, rule.maxDurationMs + startSample + endSample);
                 }
@@ -517,7 +522,9 @@ public final class SkipManager {
             long longest = 0;
             for (SkipRule rule : rules) {
                 for (SkipSample sample : rule.samples) {
-                    longest = Math.max(longest, sample.durationMs);
+                    if (!rule.useStartAsEnd || sample.marker == SkipMarker.START) {
+                        longest = Math.max(longest, sample.durationMs);
+                    }
                 }
             }
             return longest;
@@ -527,7 +534,9 @@ public final class SkipManager {
             long overlapMs = 0;
             for (SkipRule rule : rules) {
                 for (SkipSample sample : rule.samples) {
-                    overlapMs = Math.max(overlapMs, sample.durationMs);
+                    if (!rule.useStartAsEnd || sample.marker == SkipMarker.START) {
+                        overlapMs = Math.max(overlapMs, sample.durationMs);
+                    }
                 }
             }
             long decodeStart = Math.max(0, startMs - overlapMs);
@@ -568,6 +577,9 @@ public final class SkipManager {
                 List<SkipMarkerHit> newHits = new ArrayList<>();
                 for (SkipRule rule : rules) {
                     for (SkipSample sample : rule.samples) {
+                        if (rule.useStartAsEnd && sample.marker == SkipMarker.END) {
+                            continue;
+                        }
                         checkCancelled();
                         for (SkipFingerprint.Match match : SkipFingerprint.findMatches(sample.fingerprint, target,
                                 decoded.startMs, 0.82f)) {
@@ -595,9 +607,10 @@ public final class SkipManager {
                 if (task.isCancellationRequested() || (callback == null && jobs.get(key) != this)) {
                     return;
                 }
+                Resolution resolution = error == null ? resolveAll(rules, hits, durationMs, coverage)
+                        : Resolution.EMPTY;
                 SkipAnalysisSnapshot snapshot = new SkipAnalysisSnapshot(feedId, episodeId, status, revision,
-                        identity, durationMs, coverage,
-                        error == null ? resolveAll(rules, hits, durationMs, coverage) : Collections.emptyList(),
+                        identity, durationMs, coverage, resolution.occurrences, resolution.detections,
                         error, System.currentTimeMillis());
                 if (status == SkipAnalysisStatus.READY || status == SkipAnalysisStatus.NO_MATCHES
                         || status == SkipAnalysisStatus.DOWNLOAD_REQUIRED || status == SkipAnalysisStatus.ERROR) {
@@ -613,16 +626,21 @@ public final class SkipManager {
         }
     }
 
-    private static List<SkipOccurrence> resolveAll(List<SkipRule> rules, List<SkipMarkerHit> hits,
-                                                   long durationMs, List<SkipCoverage> coverage) {
+    private static Resolution resolveAll(List<SkipRule> rules, List<SkipMarkerHit> hits,
+                                         long durationMs, List<SkipCoverage> coverage) {
         List<SkipOccurrence> occurrences = new ArrayList<>();
+        List<SkipDetection> detections = new ArrayList<>();
         if (rules != null) {
             for (SkipRule rule : rules) {
-                occurrences.addAll(SkipResolver.resolve(rule, hits, durationMs, coverage));
+                SkipResolver.Resolution resolution = SkipResolver.resolveResult(rule, hits, durationMs, coverage);
+                occurrences.addAll(resolution.occurrences);
+                detections.addAll(resolution.detections);
             }
         }
         occurrences.sort(Comparator.comparingLong(item -> item.startMs));
-        return occurrences;
+        detections.sort(Comparator.comparingLong((SkipDetection item) -> item.timeMs)
+                .thenComparing(item -> item.marker));
+        return new Resolution(occurrences, detections);
     }
 
     static List<SkipCoverage> mergeCoverage(List<SkipCoverage> first, List<SkipCoverage> second) {
@@ -672,7 +690,8 @@ public final class SkipManager {
     private static long testEndPosition(SkipRule rule, long positionMs, long durationMs) {
         long longestEndSample = 0;
         for (SkipSample sample : rule.samples) {
-            if (sample.marker == SkipMarker.END) {
+            if ((sample.marker == SkipMarker.END && !rule.useStartAsEnd)
+                    || (sample.marker == SkipMarker.START && rule.useStartAsEnd)) {
                 longestEndSample = Math.max(longestEndSample, sample.durationMs);
             }
         }
@@ -786,5 +805,16 @@ public final class SkipManager {
 
     private static String key(String feedId, String episodeId) {
         return feedId + "\n" + episodeId;
+    }
+
+    private static final class Resolution {
+        private static final Resolution EMPTY = new Resolution(Collections.emptyList(), Collections.emptyList());
+        private final List<SkipOccurrence> occurrences;
+        private final List<SkipDetection> detections;
+
+        private Resolution(List<SkipOccurrence> occurrences, List<SkipDetection> detections) {
+            this.occurrences = occurrences;
+            this.detections = detections;
+        }
     }
 }

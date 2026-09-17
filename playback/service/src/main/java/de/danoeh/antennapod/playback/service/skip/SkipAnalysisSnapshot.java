@@ -13,6 +13,7 @@ public final class SkipAnalysisSnapshot {
     public final long durationMs;
     public final List<SkipCoverage> coverage;
     public final List<SkipOccurrence> occurrences;
+    public final List<SkipDetection> detections;
     public final String error;
     public final long updatedAtMs;
 
@@ -20,6 +21,14 @@ public final class SkipAnalysisSnapshot {
                                 long rulesRevision, String sourceIdentity, long durationMs,
                                 List<SkipCoverage> coverage, List<SkipOccurrence> occurrences,
                                 String error, long updatedAtMs) {
+        this(feedId, episodeId, status, rulesRevision, sourceIdentity, durationMs, coverage,
+                occurrences, Collections.emptyList(), error, updatedAtMs);
+    }
+
+    public SkipAnalysisSnapshot(String feedId, String episodeId, SkipAnalysisStatus status,
+                                long rulesRevision, String sourceIdentity, long durationMs,
+                                List<SkipCoverage> coverage, List<SkipOccurrence> occurrences,
+                                List<SkipDetection> detections, String error, long updatedAtMs) {
         this.feedId = feedId;
         this.episodeId = episodeId;
         this.status = status;
@@ -28,6 +37,7 @@ public final class SkipAnalysisSnapshot {
         this.durationMs = durationMs;
         this.coverage = Collections.unmodifiableList(new ArrayList<>(coverage));
         this.occurrences = Collections.unmodifiableList(new ArrayList<>(occurrences));
+        this.detections = Collections.unmodifiableList(new ArrayList<>(detections));
         this.error = error;
         this.updatedAtMs = updatedAtMs;
     }

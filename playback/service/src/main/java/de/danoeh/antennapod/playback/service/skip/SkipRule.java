@@ -29,6 +29,7 @@ public final class SkipRule {
     public final long fixedDurationMs;
     public final long firstRegionMs;
     public final long lastRegionMs;
+    public final boolean useStartAsEnd;
     public final List<SkipSample> samples;
 
     public SkipRule(String id, String name, boolean enabled, Type type, long minDurationMs,
@@ -36,13 +37,21 @@ public final class SkipRule {
                     long missingEndDurationMs, long firstRegionMs, long lastRegionMs,
                     List<SkipSample> samples) {
         this(id, name, enabled, type, minDurationMs, maxDurationMs, missingEndBehavior,
-                missingEndDurationMs, missingEndDurationMs, firstRegionMs, lastRegionMs, samples);
+                missingEndDurationMs, missingEndDurationMs, firstRegionMs, lastRegionMs, false, samples);
     }
 
     public SkipRule(String id, String name, boolean enabled, Type type, long minDurationMs,
                     long maxDurationMs, MissingEndBehavior missingEndBehavior,
                     long missingEndDurationMs, long fixedDurationMs, long firstRegionMs,
                     long lastRegionMs, List<SkipSample> samples) {
+        this(id, name, enabled, type, minDurationMs, maxDurationMs, missingEndBehavior,
+                missingEndDurationMs, fixedDurationMs, firstRegionMs, lastRegionMs, false, samples);
+    }
+
+    public SkipRule(String id, String name, boolean enabled, Type type, long minDurationMs,
+                    long maxDurationMs, MissingEndBehavior missingEndBehavior,
+                    long missingEndDurationMs, long fixedDurationMs, long firstRegionMs,
+                    long lastRegionMs, boolean useStartAsEnd, List<SkipSample> samples) {
         if (id == null || id.isEmpty() || name == null || type == null
                 || missingEndBehavior == null || minDurationMs < 0 || maxDurationMs < 0
                 || missingEndDurationMs < 0 || fixedDurationMs < 0 || firstRegionMs < 0
@@ -61,6 +70,7 @@ public final class SkipRule {
         this.fixedDurationMs = fixedDurationMs;
         this.firstRegionMs = firstRegionMs;
         this.lastRegionMs = lastRegionMs;
+        this.useStartAsEnd = useStartAsEnd;
         this.samples = Collections.unmodifiableList(new ArrayList<>(samples == null
                 ? Collections.emptyList() : samples));
     }
@@ -68,7 +78,7 @@ public final class SkipRule {
     public SkipRule withSamples(List<SkipSample> newSamples) {
         return new SkipRule(id, name, enabled, type, minDurationMs, maxDurationMs,
                 missingEndBehavior, missingEndDurationMs, fixedDurationMs, firstRegionMs,
-                lastRegionMs, newSamples);
+                lastRegionMs, useStartAsEnd, newSamples);
     }
 
     public void validate() {
@@ -101,7 +111,7 @@ public final class SkipRule {
         if (!hasStart) {
             throw new IllegalArgumentException("A start sample is required");
         }
-        if (type == Type.BETWEEN && !hasEnd) {
+        if (type == Type.BETWEEN && !useStartAsEnd && !hasEnd) {
             throw new IllegalArgumentException("An end sample is required for a between rule");
         }
         if (type == Type.FIXED && fixedDurationMs <= 0) {
@@ -116,6 +126,12 @@ public final class SkipRule {
     public SkipRule withEnabled(boolean newEnabled) {
         return new SkipRule(id, name, newEnabled, type, minDurationMs, maxDurationMs,
                 missingEndBehavior, missingEndDurationMs, fixedDurationMs, firstRegionMs,
-                lastRegionMs, samples);
+                lastRegionMs, useStartAsEnd, samples);
+    }
+
+    public SkipRule withUseStartAsEnd(boolean newUseStartAsEnd) {
+        return new SkipRule(id, name, enabled, type, minDurationMs, maxDurationMs,
+                missingEndBehavior, missingEndDurationMs, fixedDurationMs, firstRegionMs,
+                lastRegionMs, newUseStartAsEnd, samples);
     }
 }

@@ -460,24 +460,30 @@ public class AudioPlayerFragment extends Fragment implements
             return;
         }
         skipAnalysisButton.setVisibility(View.VISIBLE);
-        skipAnalysisButton.setEnabled((snapshot.status == SkipAnalysisStatus.ANALYZING
-                || snapshot.status == SkipAnalysisStatus.WINDOW_READY
-                || snapshot.status == SkipAnalysisStatus.READY)
-                && !snapshot.occurrences.isEmpty());
+        skipAnalysisButton.setEnabled(snapshot.status != SkipAnalysisStatus.NOT_ANALYZED
+                && (!snapshot.occurrences.isEmpty() || !snapshot.detections.isEmpty()));
         if (snapshot.status == SkipAnalysisStatus.ANALYZING) {
             skipAnalysisButton.setText(getString(R.string.audio_skip_playback_analyzing));
         } else if (snapshot.status == SkipAnalysisStatus.WAITING_FOR_AUDIO) {
             skipAnalysisButton.setText(getString(R.string.audio_skip_playback_waiting_for_audio));
         } else if (snapshot.status == SkipAnalysisStatus.WINDOW_READY) {
-            skipAnalysisButton.setText(getString(R.string.audio_skip_playback_window_ready,
+            skipAnalysisButton.setText(snapshot.occurrences.isEmpty() && !snapshot.detections.isEmpty()
+                    ? getString(R.string.audio_skip_playback_diagnostics_only,
+                    snapshot.detections.size())
+                    : getString(R.string.audio_skip_playback_window_ready,
                     snapshot.occurrences.size()));
         } else if (snapshot.status == SkipAnalysisStatus.DOWNLOAD_REQUIRED) {
             skipAnalysisButton.setText(getString(R.string.audio_skip_playback_download_required));
         } else if (snapshot.status == SkipAnalysisStatus.READY) {
-            skipAnalysisButton.setText(getString(R.string.audio_skip_playback_ready,
-                    snapshot.occurrences.size()));
+            skipAnalysisButton.setText(snapshot.occurrences.isEmpty()
+                    ? getString(R.string.audio_skip_playback_diagnostics_only,
+                    snapshot.detections.size())
+                    : getString(R.string.audio_skip_playback_ready, snapshot.occurrences.size()));
         } else if (snapshot.status == SkipAnalysisStatus.NO_MATCHES) {
-            skipAnalysisButton.setText(getString(R.string.audio_skip_playback_no_matches));
+            skipAnalysisButton.setText(snapshot.detections.isEmpty()
+                    ? getString(R.string.audio_skip_playback_no_matches)
+                    : getString(R.string.audio_skip_playback_diagnostics_only,
+                    snapshot.detections.size()));
         } else {
             skipAnalysisButton.setText(getString(R.string.audio_skip_playback_error));
         }

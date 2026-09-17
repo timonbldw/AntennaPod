@@ -51,6 +51,25 @@ public class SkipFingerprintTest {
     }
 
     @Test
+    public void recognizesIndependentFiveHundredMillisecondJingleSamples() {
+        float[] first = audio(8_000, 1, 17);
+        float[] second = audio(8_000, 1, 53);
+        first = Arrays.copyOf(first, 4_000);
+        second = Arrays.copyOf(second, 4_000);
+        float[] episode = new float[8_000 * 6];
+        System.arraycopy(first, 0, episode, 8_000, first.length);
+        System.arraycopy(second, 0, episode, 4 * 8_000, second.length);
+        List<SkipFingerprint.Match> firstMatches = SkipFingerprint.findMatches(
+                SkipFingerprint.fromPcm(first, 8_000), SkipFingerprint.fromPcm(episode, 8_000), 0, 0.82f);
+        List<SkipFingerprint.Match> secondMatches = SkipFingerprint.findMatches(
+                SkipFingerprint.fromPcm(second, 8_000), SkipFingerprint.fromPcm(episode, 8_000), 0, 0.82f);
+        assertEquals(1, firstMatches.size());
+        assertEquals(1_000, firstMatches.get(0).startMs, SkipFingerprint.HOP_MS);
+        assertEquals(1, secondMatches.size());
+        assertEquals(4_000, secondMatches.get(0).startMs, SkipFingerprint.HOP_MS);
+    }
+
+    @Test
     public void fullSampleOverlapRecognizesBoundarySpanningMarker() {
         float[] reference = audio(8_000, 4, 17);
         float[] episode = new float[8_000 * 40];

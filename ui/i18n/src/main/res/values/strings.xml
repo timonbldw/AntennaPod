@@ -21,6 +21,19 @@
     <string name="audio_skip_playback_coverage_accessibility">Analyzed audio from %1$s to %2$s</string>
     <string name="audio_skip_playback_detected_accessibility">Detected automatic skip section from %1$s to %2$s</string>
     <string name="audio_skip_playback_detected_count_accessibility">Detected automatic skip sections: %1$d</string>
+    <string name="audio_skip_playback_diagnostics_count_accessibility">Automatic skip marker diagnostics: %1$d</string>
+    <string name="audio_skip_playback_diagnostics_only">Automatic skip marker diagnostics available (%1$d)</string>
+    <string name="audio_skip_playback_start_marker">start marker</string>
+    <string name="audio_skip_playback_end_marker">end marker</string>
+    <string name="audio_skip_playback_diagnostic">At %1$s, %2$s: %3$s</string>
+    <string name="audio_skip_playback_diagnostic_fallback">At %1$s, fallback to %2$s, %3$s: %4$s</string>
+    <string name="audio_skip_playback_reason_pending">pending analysis</string>
+    <string name="audio_skip_playback_reason_missing_end">missing end marker</string>
+    <string name="audio_skip_playback_reason_missing_start">missing start marker</string>
+    <string name="audio_skip_playback_reason_too_short">too short</string>
+    <string name="audio_skip_playback_reason_too_long">too long</string>
+    <string name="audio_skip_playback_reason_replaced_start">replaced start marker</string>
+    <string name="audio_skip_playback_reason_fallback">fallback</string>
 
     <!-- Shared strings that are, or can, be shared throughout the UI  -->
     <string name="general_expand_button">Expand</string>
@@ -1093,6 +1106,7 @@
     <string name="audio_skip_add_rule_short">+ Skip rule</string>
     <string name="audio_skip_download_required">Download required</string>
     <string name="audio_skip_stream_sample_unavailable">This part is not cached. Play it first or download the episode.</string>
+    <string name="audio_skip_stream_sample_download_required">Unable to load this part. Download the episode to create a sample.</string>
     <string name="audio_skip_stream_test_download_required">Download the episode to test a rule across the whole episode.</string>
     <string name="audio_skip_current_streamed_episode">Currently playing episode</string>
     <string name="audio_skip_new_rule">New rule</string>
@@ -1106,9 +1120,9 @@
     <string name="audio_skip_search_settings">Search region</string>
     <string name="audio_skip_test_section">Test rule</string>
     <string name="audio_skip_source_section">Audio source</string>
-    <string name="audio_skip_stream_sample_download_required">Unable to load this part. Download the episode to create a sample.</string>
     <string name="audio_skip_selection_section">Sample selection</string>
     <string name="audio_skip_rule_type">Rule type</string>
+    <string name="audio_skip_use_start_as_end">Use start jingle as end jingle</string>
     <string name="audio_skip_type_between">Between start and end markers</string>
     <string name="audio_skip_type_fixed">Fixed duration from start marker</string>
     <string name="audio_skip_type_finish">Marker defines episode end</string>
@@ -1139,6 +1153,7 @@
     <string name="audio_skip_sample_start_time">Sample start</string>
     <string name="audio_skip_sample_end_time">Sample end</string>
     <string name="audio_skip_timestamp_hint">00:00.000 or 0:00:00.000</string>
+    <string name="audio_skip_audio_loading">Loading audio...</string>
     <string name="audio_skip_waveform_loading">Loading waveform...</string>
     <string name="audio_skip_waveform_unavailable">Waveform unavailable for this audio.</string>
     <string name="audio_skip_waveform_accessibility">Audio waveform with adjustable sample start and end handles</string>
@@ -1153,11 +1168,11 @@
     <string name="audio_skip_stop_preview">Stop</string>
     <string name="audio_skip_test_rule">Test rule</string>
     <string name="audio_skip_test_analyzing">Analyzing selected episode...</string>
-    <string name="audio_skip_audio_loading">Loading audio...</string>
     <string name="audio_skip_test_analyzing_from">Reading audio from %s...</string>
     <string name="audio_skip_test_analyzing_progress">Reading audio through %s...</string>
     <string name="audio_skip_test_no_matches">No matches found.</string>
     <string name="audio_skip_test_ready">Found %1$d matching range(s): %2$s</string>
+    <string name="audio_skip_test_diagnostics">No valid matching ranges. %s</string>
     <string name="audio_skip_test_error">Rule test failed: %s</string>
     <string name="audio_skip_sample_weak">This sample is too quiet or unclear. Choose a stronger clip.</string>
     <string name="audio_skip_validation_name">Enter a rule name.</string>
