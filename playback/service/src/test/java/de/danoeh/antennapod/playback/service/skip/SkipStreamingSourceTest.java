@@ -5,6 +5,10 @@ import android.net.Uri;
 import androidx.annotation.OptIn;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.database.StandaloneDatabaseProvider;
+import androidx.media3.datasource.ByteArrayDataSource;
+import androidx.media3.datasource.DataSource;
+import androidx.media3.datasource.DataSpec;
+import androidx.media3.datasource.TransferListener;
 import androidx.media3.datasource.cache.CacheSpan;
 import androidx.media3.datasource.cache.ContentMetadataMutations;
 import androidx.media3.datasource.cache.NoOpCacheEvictor;
@@ -18,7 +22,18 @@ import org.robolectric.RobolectricTestRunner;
 
 import java.io.File;
 import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InterruptedIOException;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
@@ -253,6 +268,296 @@ public class SkipStreamingSourceTest {
         }
     }
 
+    @Test
+    public void fetchesRequestedBytesAndReusesCache() throws Exception {
+        byte[] upstream = new byte[] {10, 11, 12, 13, 14, 15};
+        AtomicInteger sources = new AtomicInteger();
+        DataSource.Factory upstreamFactory = () -> {
+            sources.incrementAndGet();
+            return new ByteArrayDataSource(upstream);
+        };
+        SkipStreamingSource.Registration registration = SkipStreamingSource.register(cache,
+                Uri.parse("https://example.com/audio.mp3"), upstreamFactory);
+        cache.applyContentMetadataMutations(registration.cacheKey,
+                ContentMetadataMutations.setContentLength(new ContentMetadataMutations(), upstream.length));
+
+        try (SkipStreamingSource.CachedMediaDataSource source = SkipStreamingSource.open(registration.uri, true)) {
+            byte[] result = new byte[3];
+            assertEquals(3, source.readAt(2, result, 0, result.length));
+            assertArrayEquals(new byte[] {12, 13, 14}, result);
+        }
+        assertEquals(1, sources.get());
+        try (SkipStreamingSource.CachedMediaDataSource source = SkipStreamingSource.open(registration.uri)) {
+            byte[] result = new byte[3];
+            assertEquals(3, source.readAt(2, result, 0, result.length));
+            assertArrayEquals(new byte[] {12, 13, 14}, result);
+        }
+        assertEquals(1, sources.get());
+    }
+
+    @Test
+    public void cacheOnlyOpenDoesNotUseConfiguredUpstream() throws Exception {
+        AtomicInteger sources = new AtomicInteger();
+        SkipStreamingSource.Registration registration = SkipStreamingSource.register(cache,
+                Uri.parse("https://example.com/audio.mp3"), () -> {
+                    sources.incrementAndGet();
+                    return new ByteArrayDataSource(new byte[] {1});
+                });
+        cache.applyContentMetadataMutations(registration.cacheKey,
+                ContentMetadataMutations.setContentLength(new ContentMetadataMutations(), 1));
+
+        try (SkipStreamingSource.CachedMediaDataSource source = SkipStreamingSource.open(registration.uri)) {
+            try {
+                source.readAt(0, new byte[1], 0, 1);
+                fail("Expected cache-only miss");
+            } catch (SkipStreamingSource.UnavailableException expected) {
+                assertEquals("Requested audio bytes are not cached", expected.getMessage());
+            }
+        }
+        assertEquals(0, sources.get());
+    }
+
+    @Test
+    public void fetchBudgetStopsAdditionalUpstreamBytes() throws Exception {
+        byte[] upstream = new byte[8 * 1024 * 1024 + 1];
+        SkipStreamingSource.Registration registration = SkipStreamingSource.register(cache,
+                Uri.parse("https://example.com/audio.mp3"), () -> new ByteArrayDataSource(upstream));
+        cache.applyContentMetadataMutations(registration.cacheKey,
+                ContentMetadataMutations.setContentLength(new ContentMetadataMutations(), upstream.length));
+
+        try (SkipStreamingSource.CachedMediaDataSource source = SkipStreamingSource.open(registration.uri, true)) {
+            assertEquals(8 * 1024 * 1024, source.readAt(0, upstream, 0, 8 * 1024 * 1024));
+            try {
+                source.readAt(8 * 1024 * 1024, upstream, 0, 1);
+                fail("Expected fetch budget failure");
+            } catch (SkipStreamingSource.UnavailableException expected) {
+                assertEquals("Audio clip fetch limit exceeded", expected.getMessage());
+            }
+        }
+    }
+
+    @Test
+    public void ignoredRangeBytesConsumedDuringOpenCountAgainstBudget() throws Exception {
+        IgnoredRangeDataSource upstream = new IgnoredRangeDataSource();
+        long position = 8 * 1024 * 1024 + 1L;
+        SkipStreamingSource.Registration registration = SkipStreamingSource.register(cache,
+                Uri.parse("https://example.com/audio.mp3"), () -> upstream);
+        cache.applyContentMetadataMutations(registration.cacheKey,
+                ContentMetadataMutations.setContentLength(new ContentMetadataMutations(), position + 1));
+
+        try (SkipStreamingSource.CachedMediaDataSource source = SkipStreamingSource.open(registration.uri, true)) {
+            try {
+                source.readAt(position, new byte[1], 0, 1);
+                fail("Expected fetch budget failure");
+            } catch (SkipStreamingSource.UnavailableException expected) {
+                assertEquals("Audio clip fetch limit exceeded", expected.getMessage());
+            }
+        }
+        assertTrue(upstream.transferredBytes.get() <= 8 * 1024 * 1024);
+    }
+
+    @Test
+    public void interruptingRequestingThreadClosesInFlightUpstream() throws Exception {
+        BlockingDataSource upstream = new BlockingDataSource();
+        SkipStreamingSource.Registration registration = SkipStreamingSource.register(cache,
+                Uri.parse("https://example.com/audio.mp3"), () -> upstream);
+        cache.applyContentMetadataMutations(registration.cacheKey,
+                ContentMetadataMutations.setContentLength(new ContentMetadataMutations(), 1));
+        AtomicReference<SkipStreamingSource.CachedMediaDataSource> source = new AtomicReference<>();
+        CountDownLatch sourceReady = new CountDownLatch(1);
+        CountDownLatch releaseOwner = new CountDownLatch(1);
+        Thread owner = new Thread(() -> {
+            try {
+                source.set(SkipStreamingSource.open(registration.uri, true));
+                sourceReady.countDown();
+                try {
+                    releaseOwner.await();
+                } catch (InterruptedException expected) {
+                    Thread.currentThread().interrupt();
+                    while (releaseOwner.getCount() > 0) {
+                        Thread.yield();
+                    }
+                }
+            } catch (Exception ignored) {
+            }
+        });
+        owner.start();
+        Thread callback = null;
+        try {
+            assertTrue(sourceReady.await(1, TimeUnit.SECONDS));
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+            callback = new Thread(() -> {
+                try {
+                    source.get().readAt(0, new byte[1], 0, 1);
+                } catch (Throwable error) {
+                    failure.set(error);
+                }
+            });
+            callback.start();
+            assertTrue(upstream.opened.await(1, TimeUnit.SECONDS));
+            owner.interrupt();
+            callback.join(1_000);
+            assertFalse(callback.isAlive());
+            assertTrue(upstream.closed.get());
+            assertTrue(failure.get() instanceof InterruptedIOException);
+        } finally {
+            releaseOwner.countDown();
+            owner.join(1_000);
+            if (callback != null && callback.isAlive()) {
+                callback.interrupt();
+                callback.join(1_000);
+            }
+            if (source.get() != null) {
+                source.get().close();
+            }
+        }
+    }
+
+    @Test
+    public void invalidatingSessionClosesInFlightUpstream() throws Exception {
+        BlockingDataSource upstream = new BlockingDataSource();
+        SkipStreamingSource.Registration registration = SkipStreamingSource.register(cache,
+                Uri.parse("https://example.com/audio.mp3"), () -> upstream);
+        cache.applyContentMetadataMutations(registration.cacheKey,
+                ContentMetadataMutations.setContentLength(new ContentMetadataMutations(), 1));
+        SkipStreamingSource.CachedMediaDataSource source = SkipStreamingSource.open(registration.uri, true);
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        Thread callback = new Thread(() -> {
+            try {
+                source.readAt(0, new byte[1], 0, 1);
+            } catch (Throwable error) {
+                failure.set(error);
+            }
+        });
+        callback.start();
+        assertTrue(upstream.opened.await(1, TimeUnit.SECONDS));
+        SkipStreamingSource.release(cache);
+        callback.join(1_000);
+        assertFalse(callback.isAlive());
+        assertTrue(upstream.closed.get());
+        assertTrue(failure.get() instanceof SkipStreamingSource.UnavailableException);
+        assertEquals("Streaming cache source is unavailable", failure.get().getMessage());
+        source.close();
+    }
+
+    @Test
+    public void completedFetchWaitsForCommittedCancellation() throws Exception {
+        BlockingCloseDataSource upstream = new BlockingCloseDataSource();
+        SkipStreamingSource.Registration registration = SkipStreamingSource.register(cache,
+                Uri.parse("https://example.com/audio.mp3"), () -> upstream);
+        cache.applyContentMetadataMutations(registration.cacheKey,
+                ContentMetadataMutations.setContentLength(new ContentMetadataMutations(), 1));
+        AtomicReference<SkipStreamingSource.CachedMediaDataSource> source = new AtomicReference<>();
+        CountDownLatch sourceReady = new CountDownLatch(1);
+        CountDownLatch releaseOwner = new CountDownLatch(1);
+        Thread owner = new Thread(() -> {
+            try {
+                source.set(SkipStreamingSource.open(registration.uri, true));
+                sourceReady.countDown();
+                try {
+                    releaseOwner.await();
+                } catch (InterruptedException expected) {
+                    Thread.currentThread().interrupt();
+                    while (releaseOwner.getCount() > 0) {
+                        Thread.yield();
+                    }
+                }
+            } catch (Exception ignored) {
+            }
+        });
+        owner.start();
+        Thread callback = null;
+        try {
+            assertTrue(sourceReady.await(1, TimeUnit.SECONDS));
+            callback = new Thread(() -> {
+                try {
+                    source.get().readAt(0, new byte[1], 0, 1);
+                } catch (IOException ignored) {
+                }
+            });
+            callback.start();
+            assertTrue(upstream.reading.await(1, TimeUnit.SECONDS));
+            owner.interrupt();
+            assertTrue(upstream.closing.await(1, TimeUnit.SECONDS));
+            upstream.finishRead.countDown();
+            Thread.sleep(20);
+            assertTrue(callback.isAlive());
+            upstream.finishClose.countDown();
+            callback.join(1_000);
+            assertFalse(callback.isAlive());
+        } finally {
+            upstream.finishRead.countDown();
+            upstream.finishClose.countDown();
+            releaseOwner.countDown();
+            owner.join(1_000);
+            if (callback != null && callback.isAlive()) {
+                callback.interrupt();
+                callback.join(1_000);
+            }
+            if (source.get() != null) {
+                source.get().close();
+            }
+        }
+    }
+
+    @Test
+    public void callbackOnOtherThreadObservesRequestingThreadCancellation() throws Exception {
+        byte[] upstream = new byte[] {1};
+        SkipStreamingSource.Registration registration = SkipStreamingSource.register(cache,
+                Uri.parse("https://example.com/audio.mp3"), () -> new ByteArrayDataSource(upstream));
+        cache.applyContentMetadataMutations(registration.cacheKey,
+                ContentMetadataMutations.setContentLength(new ContentMetadataMutations(), upstream.length));
+        SkipStreamingSource.CachedMediaDataSource source = SkipStreamingSource.open(registration.uri, true);
+        try {
+            AtomicInteger interrupted = new AtomicInteger();
+            AtomicBoolean start = new AtomicBoolean();
+            Thread callback = new Thread(() -> {
+                while (!start.get()) {
+                    Thread.yield();
+                }
+                try {
+                    source.readAt(0, new byte[1], 0, 1);
+                } catch (InterruptedIOException expected) {
+                    interrupted.incrementAndGet();
+                } catch (Exception ignored) {
+                }
+            });
+            callback.start();
+            Thread.currentThread().interrupt();
+            start.set(true);
+            while (callback.isAlive()) {
+                Thread.yield();
+            }
+            assertEquals(1, interrupted.get());
+        } finally {
+            Thread.interrupted();
+            source.close();
+        }
+    }
+
+    @Test
+    public void invalidationPreventsFetchFromExistingOpenSource() throws Exception {
+        byte[] upstream = new byte[] {1};
+        AtomicInteger sources = new AtomicInteger();
+        SkipStreamingSource.Registration registration = SkipStreamingSource.register(cache,
+                Uri.parse("https://example.com/audio.mp3"), () -> {
+                    sources.incrementAndGet();
+                    return new ByteArrayDataSource(upstream);
+                });
+        cache.applyContentMetadataMutations(registration.cacheKey,
+                ContentMetadataMutations.setContentLength(new ContentMetadataMutations(), upstream.length));
+        try (SkipStreamingSource.CachedMediaDataSource source = SkipStreamingSource.open(registration.uri, true)) {
+            SkipStreamingSource.release(cache);
+            try {
+                source.readAt(0, new byte[1], 0, 1);
+                fail("Expected invalidated source");
+            } catch (SkipStreamingSource.UnavailableException expected) {
+                assertEquals("Streaming cache source is unavailable", expected.getMessage());
+            }
+        }
+        assertEquals(0, sources.get());
+    }
+
     private void writeCache(String key, byte[] data) throws Exception {
         writeCache(key, 0, data);
     }
@@ -267,6 +572,140 @@ public class SkipStreamingSourceTest {
             cache.commitFile(file, data.length);
         } finally {
             cache.releaseHoleSpan(hole);
+        }
+    }
+
+    private static final class IgnoredRangeDataSource implements DataSource {
+        private final List<TransferListener> listeners = new ArrayList<>();
+        final AtomicInteger transferredBytes = new AtomicInteger();
+        private volatile boolean closed;
+
+        @Override
+        public void addTransferListener(TransferListener transferListener) {
+            listeners.add(transferListener);
+        }
+
+        @Override
+        public long open(DataSpec dataSpec) throws IOException {
+            for (TransferListener listener : listeners) {
+                listener.onTransferStart(this, dataSpec, true);
+            }
+            long remaining = dataSpec.position;
+            while (remaining > 0 && !closed) {
+                int bytes = (int) Math.min(4096, remaining);
+                transferredBytes.addAndGet(bytes);
+                for (TransferListener listener : listeners) {
+                    listener.onBytesTransferred(this, dataSpec, true, bytes);
+                }
+                remaining -= bytes;
+            }
+            if (closed) {
+                throw new IOException("closed");
+            }
+            return dataSpec.length;
+        }
+
+        @Override
+        public int read(byte[] buffer, int offset, int length) {
+            buffer[offset] = 1;
+            return 1;
+        }
+
+        @Override
+        public Uri getUri() {
+            return Uri.parse("https://example.com/audio.mp3");
+        }
+
+        @Override
+        public Map<String, List<String>> getResponseHeaders() {
+            return Collections.emptyMap();
+        }
+
+        @Override
+        public void close() {
+            closed = true;
+        }
+    }
+
+    private static final class BlockingDataSource implements DataSource {
+        final CountDownLatch opened = new CountDownLatch(1);
+        final AtomicBoolean closed = new AtomicBoolean();
+
+        @Override
+        public void addTransferListener(TransferListener transferListener) {
+        }
+
+        @Override
+        public long open(DataSpec dataSpec) throws IOException {
+            opened.countDown();
+            while (!closed.get()) {
+                Thread.yield();
+            }
+            throw new IOException("closed");
+        }
+
+        @Override
+        public int read(byte[] buffer, int offset, int length) {
+            return -1;
+        }
+
+        @Override
+        public Uri getUri() {
+            return Uri.parse("https://example.com/audio.mp3");
+        }
+
+        @Override
+        public Map<String, List<String>> getResponseHeaders() {
+            return Collections.emptyMap();
+        }
+
+        @Override
+        public void close() {
+            closed.set(true);
+        }
+    }
+
+    private static final class BlockingCloseDataSource implements DataSource {
+        final CountDownLatch reading = new CountDownLatch(1);
+        final CountDownLatch finishRead = new CountDownLatch(1);
+        final CountDownLatch closing = new CountDownLatch(1);
+        final CountDownLatch finishClose = new CountDownLatch(1);
+
+        @Override
+        public void addTransferListener(TransferListener transferListener) {
+        }
+
+        @Override
+        public long open(DataSpec dataSpec) {
+            return dataSpec.length;
+        }
+
+        @Override
+        public int read(byte[] buffer, int offset, int length) {
+            reading.countDown();
+            while (finishRead.getCount() > 0) {
+                Thread.yield();
+            }
+            buffer[offset] = 1;
+            return 1;
+        }
+
+        @Override
+        public Uri getUri() {
+            return Uri.parse("https://example.com/audio.mp3");
+        }
+
+        @Override
+        public Map<String, List<String>> getResponseHeaders() {
+            return Collections.emptyMap();
+        }
+
+        @Override
+        public void close() {
+            closing.countDown();
+            while (finishClose.getCount() > 0) {
+                Thread.yield();
+            }
         }
     }
 }

@@ -16,6 +16,7 @@ import androidx.media3.datasource.DefaultDataSource;
 import androidx.media3.datasource.DefaultHttpDataSource;
 import androidx.media3.datasource.HttpDataSource;
 import androidx.media3.datasource.ResolvingDataSource;
+import androidx.media3.datasource.TransferListener;
 import androidx.media3.datasource.cache.CacheDataSource;
 import androidx.media3.datasource.cache.CacheDataSink;
 import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor;
@@ -38,7 +39,14 @@ import de.danoeh.antennapod.playback.service.skip.SkipStreamingSource;
 import de.danoeh.antennapod.storage.preferences.UserPreferences;
 
 import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InterruptedIOException;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.util.Collections;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
@@ -186,7 +194,18 @@ public class ExoPlayerUtils {
                     ? mediaItem.localConfiguration.uri.toString() : "";
             if (uri.startsWith("http")) {
                 SkipStreamingSource.Registration source = SkipStreamingSource.register(
-                        simpleCache, mediaItem.localConfiguration.uri);
+                        simpleCache, mediaItem.localConfiguration.uri,
+                        new ResolvingDataSource.Factory(
+                                () -> new CaptureHttpDataSource(authHeader), dataSpec -> {
+                                    String originalUrl = dataSpec.uri.toString();
+                                    String resolvedUrl = redirectCache.get(originalUrl);
+                                    if (resolvedUrl == null) {
+                                        resolvedUrl = RedirectChecker.getFinalUrl(originalUrl);
+                                        redirectCache.putIfAbsent(originalUrl, resolvedUrl);
+                                    }
+                                    return resolvedUrl.equals(originalUrl)
+                                            ? dataSpec : dataSpec.withUri(Uri.parse(resolvedUrl));
+                                }));
                 CacheDataSource.Factory cacheFactory = new CacheDataSource.Factory()
                         .setCache(simpleCache)
                         .setCacheKeyFactory(dataSpec -> source.cacheKey)
@@ -205,6 +224,111 @@ public class ExoPlayerUtils {
         @Override
         public int[] getSupportedTypes() {
             return defaultFactory.getSupportedTypes();
+        }
+
+        static final class CaptureHttpDataSource implements DataSource {
+            private final String authHeader;
+            private final ConnectionFactory connectionFactory;
+            private volatile HttpURLConnection connection;
+            private volatile InputStream input;
+            private volatile boolean closed;
+            private Uri uri;
+            private long remaining;
+
+            CaptureHttpDataSource(String authHeader) {
+                this(authHeader, url -> (HttpURLConnection) url.openConnection());
+            }
+
+            CaptureHttpDataSource(String authHeader, ConnectionFactory connectionFactory) {
+                this.authHeader = authHeader;
+                this.connectionFactory = connectionFactory;
+            }
+
+            @Override
+            public void addTransferListener(TransferListener transferListener) {
+            }
+
+            @Override
+            public long open(DataSpec dataSpec) throws IOException {
+                uri = dataSpec.uri;
+                connection = connectionFactory.open(new URL(uri.toString()));
+                if (closed || Thread.currentThread().isInterrupted()) {
+                    connection.disconnect();
+                    throw new InterruptedIOException("Audio clip capture was interrupted");
+                }
+                connection.setConnectTimeout(DefaultHttpDataSource.DEFAULT_CONNECT_TIMEOUT_MILLIS);
+                connection.setReadTimeout(DefaultHttpDataSource.DEFAULT_READ_TIMEOUT_MILLIS);
+                connection.setRequestProperty("User-Agent", UserAgentInterceptor.USER_AGENT);
+                connection.setRequestProperty("Accept-Encoding", "identity");
+                if (authHeader != null) {
+                    connection.setRequestProperty("Authorization", authHeader);
+                }
+                if (dataSpec.position != 0 || dataSpec.length != C.LENGTH_UNSET) {
+                    String end = dataSpec.length == C.LENGTH_UNSET ? ""
+                            : Long.toString(dataSpec.position + dataSpec.length - 1);
+                    connection.setRequestProperty("Range", "bytes=" + dataSpec.position + "-" + end);
+                }
+                connection.connect();
+                if (closed || Thread.currentThread().isInterrupted()) {
+                    close();
+                    throw new InterruptedIOException("Audio clip capture was interrupted");
+                }
+                int responseCode = connection.getResponseCode();
+                if (responseCode < 200 || responseCode > 299) {
+                    close();
+                    throw new IOException("HTTP response code: " + responseCode);
+                }
+                if (dataSpec.position > 0 && responseCode != HttpURLConnection.HTTP_PARTIAL) {
+                    close();
+                    throw new IOException("HTTP server does not support range requests");
+                }
+                input = connection.getInputStream();
+                remaining = dataSpec.length;
+                return remaining;
+            }
+
+            @Override
+            public int read(byte[] buffer, int offset, int length) throws IOException {
+                if (remaining == 0) {
+                    return C.RESULT_END_OF_INPUT;
+                }
+                int read = input.read(buffer, offset,
+                        remaining == C.LENGTH_UNSET ? length : (int) Math.min(length, remaining));
+                if (read > 0 && remaining != C.LENGTH_UNSET) {
+                    remaining -= read;
+                }
+                return read;
+            }
+
+            @Override
+            public Uri getUri() {
+                return uri;
+            }
+
+            @Override
+            public Map<String, List<String>> getResponseHeaders() {
+                return Collections.emptyMap();
+            }
+
+            @Override
+            public void close() throws IOException {
+                closed = true;
+                try {
+                    if (input != null) {
+                        input.close();
+                    }
+                } finally {
+                    input = null;
+                    if (connection != null) {
+                        connection.disconnect();
+                    }
+                    connection = null;
+                }
+            }
+
+            interface ConnectionFactory {
+                HttpURLConnection open(URL url) throws IOException;
+            }
         }
     }
 }

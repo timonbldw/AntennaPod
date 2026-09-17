@@ -1106,6 +1106,7 @@
     <string name="audio_skip_search_settings">Search region</string>
     <string name="audio_skip_test_section">Test rule</string>
     <string name="audio_skip_source_section">Audio source</string>
+    <string name="audio_skip_stream_sample_download_required">Unable to load this part. Download the episode to create a sample.</string>
     <string name="audio_skip_selection_section">Sample selection</string>
     <string name="audio_skip_rule_type">Rule type</string>
     <string name="audio_skip_type_between">Between start and end markers</string>
@@ -1152,6 +1153,7 @@
     <string name="audio_skip_stop_preview">Stop</string>
     <string name="audio_skip_test_rule">Test rule</string>
     <string name="audio_skip_test_analyzing">Analyzing selected episode...</string>
+    <string name="audio_skip_audio_loading">Loading audio...</string>
     <string name="audio_skip_test_analyzing_from">Reading audio from %s...</string>
     <string name="audio_skip_test_analyzing_progress">Reading audio through %s...</string>
     <string name="audio_skip_test_no_matches">No matches found.</string>

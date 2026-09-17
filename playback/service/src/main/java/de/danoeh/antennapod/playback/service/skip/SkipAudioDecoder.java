@@ -23,6 +23,11 @@ final class SkipAudioDecoder {
 
     static DecodedAudio decode(Context context, Uri uri, long startMs, long endMs)
             throws IOException, InterruptedException {
+        return decode(context, uri, startMs, endMs, false);
+    }
+
+    static DecodedAudio decode(Context context, Uri uri, long startMs, long endMs, boolean fetchMissing)
+            throws IOException, InterruptedException {
         if (uri == null || startMs < 0 || endMs <= startMs || endMs - startMs > MAX_WINDOW_MS) {
             throw new IllegalArgumentException("Invalid decode range");
         }
@@ -32,7 +37,7 @@ final class SkipAudioDecoder {
         boolean started = false;
         try {
             if (SkipStreamingSource.isStreaming(uri)) {
-                streamingSource = SkipStreamingSource.open(uri);
+                streamingSource = SkipStreamingSource.open(uri, fetchMissing);
                 extractor.setDataSource(streamingSource);
             } else if (uri.getScheme() == null || "file".equals(uri.getScheme())) {
                 extractor.setDataSource(uri.getPath());
@@ -50,6 +55,7 @@ final class SkipAudioDecoder {
                 throw new IOException("Audio MIME type is missing");
             }
             if (streamingSource != null) {
+                streamingSource.throwIfInterrupted();
                 streamingSource.acceptOptionalMp3TailProbe(mime);
             }
             codec = MediaCodec.createDecoderByType(mime);
@@ -58,6 +64,7 @@ final class SkipAudioDecoder {
             started = true;
             extractor.seekTo(Math.max(0, startMs - 250) * 1_000, MediaExtractor.SEEK_TO_PREVIOUS_SYNC);
             if (streamingSource != null) {
+                streamingSource.throwIfInterrupted();
                 streamingSource.throwIfUnavailable();
             }
             PcmAccumulator accumulator = new PcmAccumulator(startMs, endMs);
@@ -84,6 +91,7 @@ final class SkipAudioDecoder {
                         inputBuffer.clear();
                         int size = extractor.readSampleData(inputBuffer, 0);
                         if (streamingSource != null) {
+                            streamingSource.throwIfInterrupted();
                             streamingSource.throwIfUnavailable();
                         }
                         long timeUs = extractor.getSampleTime();
@@ -149,11 +157,13 @@ final class SkipAudioDecoder {
                 }
             }
             if (streamingSource != null) {
+                streamingSource.throwIfInterrupted();
                 streamingSource.throwIfUnavailable();
             }
             return accumulator.result(sourceEnded && outputEnded, previousEndUs);
         } catch (IOException | RuntimeException e) {
             if (streamingSource != null) {
+                streamingSource.throwIfInterrupted();
                 streamingSource.throwIfUnavailable();
             }
             throw e;
@@ -243,7 +253,7 @@ final class SkipAudioDecoder {
         }
     }
 
-    private static final class PcmAccumulator {
+    static final class PcmAccumulator {
         private static final double OUTPUT_US = 1_000_000.0 / SkipFingerprint.SAMPLE_RATE;
         private final float[] values;
         private final long requestedStartMs;
@@ -271,7 +281,8 @@ final class SkipAudioDecoder {
                 actualStartMs = (long) Math.ceil(fromUs / 1_000.0);
                 binStartUs = actualStartMs * 1_000.0;
             }
-            fromUs = Math.max(fromUs, binStartUs + filledUs);
+            double nextUs = binStartUs + filledUs;
+            fromUs = Math.abs(fromUs - nextUs) <= 0.0001 ? nextUs : Math.max(fromUs, nextUs);
             if (endUs <= fromUs) {
                 return;
             }

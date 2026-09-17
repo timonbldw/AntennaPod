@@ -9,6 +9,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.text.Editable;
 import android.text.TextWatcher;
+import android.util.Log;
 import android.view.LayoutInflater;
 import android.view.MotionEvent;
 import android.view.View;
@@ -59,6 +60,7 @@ import io.reactivex.rxjava3.schedulers.Schedulers;
 
 public final class SampleEditorView extends LinearLayout {
     public static final String EXTRA_MARKER = "marker";
+    private static final long CLIP_LOAD_DEBOUNCE_MS = 400;
 
     private final long feedId;
     private final SkipRule rule;
@@ -83,6 +85,8 @@ public final class SampleEditorView extends LinearLayout {
     private final List<EpisodeInfo> episodes = new ArrayList<>();
     private final Handler previewHandler = new Handler(Looper.getMainLooper());
     private final Handler inputHandler = new Handler(Looper.getMainLooper());
+    private final Handler clipHandler = new Handler(Looper.getMainLooper());
+    private final Runnable debouncedWaveformLoad = this::loadWaveform;
     private SkipTask waveformTask;
     private SkipTask sampleTask;
     private MediaPlayer mediaPlayer;
@@ -190,6 +194,7 @@ public final class SampleEditorView extends LinearLayout {
         closeClip();
         previewHandler.removeCallbacksAndMessages(null);
         inputHandler.removeCallbacksAndMessages(null);
+        clipHandler.removeCallbacksAndMessages(null);
         super.onDetachedFromWindow();
     }
 
@@ -289,17 +294,9 @@ public final class SampleEditorView extends LinearLayout {
     }
 
     private void selectEpisode(EpisodeInfo value) {
-        clipGeneration++;
-        if (clipTask != null) {
-            clipTask.dispose();
-        }
-        if (waveformTask != null) {
-            waveformTask.cancel();
-        }
-        cancelSampleExtraction();
-        episode = value;
-        stopPreview();
+        cancelClipLoad();
         closeClip();
+        episode = value;
         episodeDuration = Math.max(1, value.durationMs);
         windowLength = Math.min(30_000, episodeDuration);
         if (isPreferredEpisode(value) && preferredPosition >= 0) {
@@ -316,7 +313,7 @@ public final class SampleEditorView extends LinearLayout {
         updateWindowPosition();
         waveformView.setRange(windowStart, windowStart + windowLength, selectionStart, selectionEnd);
         setSelectionInputs();
-        loadWaveform();
+        scheduleWaveformLoad();
     }
 
     private void setWindowPosition(long value) {
@@ -331,7 +328,7 @@ public final class SampleEditorView extends LinearLayout {
         if (mediaPlayer != null) {
             stopPreview();
         }
-        loadWaveform();
+        scheduleWaveformLoad();
     }
 
     private void updateWindowPosition() {
@@ -351,7 +348,13 @@ public final class SampleEditorView extends LinearLayout {
         waveformLoading = true;
         setStatus(R.string.audio_skip_waveform_loading);
         if (SkipStreamingSource.isStreaming(episode.uri)) {
-            loadStreamingClip(generation);
+            if (clip != null && windowStart >= clip.startMs
+                    && windowStart + windowLength <= clip.endMs && isSelectionAvailable()) {
+                extractWaveform(clip.uri, windowStart - clip.startMs,
+                        windowStart + windowLength - clip.startMs);
+            } else {
+                loadStreamingClip(generation);
+            }
             return;
         }
         play.setEnabled(true);
@@ -359,19 +362,51 @@ public final class SampleEditorView extends LinearLayout {
         extractWaveform(episode.uri, windowStart, Math.min(episodeDuration, windowStart + windowLength));
     }
 
+    private void scheduleWaveformLoad() {
+        if (episode == null || destroyed) {
+            return;
+        }
+        if (!SkipStreamingSource.isStreaming(episode.uri)) {
+            loadWaveform();
+            return;
+        }
+        cancelClipLoad();
+        clipHandler.postDelayed(debouncedWaveformLoad, CLIP_LOAD_DEBOUNCE_MS);
+    }
+
+    private void cancelClipLoad() {
+        clipHandler.removeCallbacks(debouncedWaveformLoad);
+        clipGeneration++;
+        if (clipTask != null) {
+            clipTask.dispose();
+            clipTask = null;
+        }
+        if (waveformTask != null) {
+            waveformTask.cancel();
+            waveformTask = null;
+        }
+        cancelSampleExtraction();
+        stopPreview();
+        if (!isSelectionAvailable()) {
+            closeClip();
+        }
+        waveformLoading = false;
+        waveformView.setWaveform(null);
+        setStatus("");
+        updateStreamControls();
+    }
+
     private void loadStreamingClip(int generation) {
         if (clipTask != null) {
             clipTask.dispose();
         }
         stopPreview();
-        closeClip();
-        play.setEnabled(false);
-        save.setEnabled(false);
+        updateStreamControls();
         Uri sourceUri = episode.uri;
         long start = windowStart;
         long end = Math.min(episodeDuration, windowStart + windowLength);
-        long selectedStart = Math.max(start, selectionStart);
-        long selectedEnd = Math.min(end, selectionEnd);
+        long selectedStart = selectionStart;
+        long selectedEnd = selectionEnd;
         Object clipLock = new Object();
         SkipAudioClip[] createdClip = {null};
         boolean[] clipDisposed = {false};
@@ -381,7 +416,17 @@ public final class SampleEditorView extends LinearLayout {
                     try {
                         value = SkipAudioClip.create(getContext(), sourceUri, start, end);
                     } catch (IOException error) {
-                        value = SkipAudioClip.create(getContext(), sourceUri, selectedStart, selectedEnd);
+                        try {
+                            value = SkipAudioClip.create(getContext(), sourceUri, selectedStart, selectedEnd);
+                        } catch (IOException selectedError) {
+                            post(() -> {
+                                if (!destroyed && generation == clipGeneration) {
+                                    setStatus(R.string.audio_skip_audio_loading);
+                                }
+                            });
+                            value = SkipAudioClip.create(getContext(), sourceUri,
+                                    selectedStart, selectedEnd, true);
+                        }
                     }
                     synchronized (clipLock) {
                         if (clipDisposed[0]) {
@@ -418,6 +463,9 @@ public final class SampleEditorView extends LinearLayout {
                         value.close();
                         return;
                     }
+                    cancelSampleExtraction();
+                    stopPreview();
+                    closeClip();
                     clip = value;
                     windowStart = value.startMs;
                     windowLength = value.endMs - value.startMs;
@@ -430,9 +478,21 @@ public final class SampleEditorView extends LinearLayout {
                     extractWaveform(value.uri, 0, value.endMs - value.startMs);
                 }, error -> {
                     if (!destroyed && generation == clipGeneration) {
+                        Log.w("SampleEditorView", "Unable to capture streaming sample "
+                                + selectedStart + "-" + selectedEnd + " ms", error);
                         waveformLoading = false;
                         waveformView.setWaveform(null);
-                        setStatus(R.string.audio_skip_stream_sample_unavailable);
+                        updateStreamControls();
+                        if (isSelectionAvailable()) {
+                            windowStart = clip.startMs;
+                            windowLength = clip.endMs - clip.startMs;
+                            updateWindowPosition();
+                            waveformView.setRange(windowStart, windowStart + windowLength,
+                                    selectionStart, selectionEnd);
+                            extractWaveform(clip.uri, 0, windowLength);
+                        } else {
+                            setStatus(R.string.audio_skip_stream_sample_download_required);
+                        }
                     }
                 });
     }
@@ -536,7 +596,7 @@ public final class SampleEditorView extends LinearLayout {
             windowPosition.setMax((int) episodeDuration);
             updateWindowPosition();
             updateSelection();
-            loadWaveform();
+            scheduleWaveformLoad();
         });
         parent.addView(value, new LinearLayout.LayoutParams(-2, -2));
     }
@@ -545,6 +605,10 @@ public final class SampleEditorView extends LinearLayout {
         waveformView.setRange(windowStart, windowStart + windowLength, selectionStart, selectionEnd);
         setSelectionInputs();
         updateStreamControls();
+        if (episode != null && SkipStreamingSource.isStreaming(episode.uri)
+                && !isSelectionAvailable()) {
+            scheduleWaveformLoad();
+        }
     }
 
     private void setSelectionInputs() {
@@ -570,7 +634,10 @@ public final class SampleEditorView extends LinearLayout {
         waveformView.setRange(windowStart, windowStart + windowLength, selectionStart, selectionEnd);
         updateStreamControls();
         if (reloadWaveform) {
-            loadWaveform();
+            scheduleWaveformLoad();
+        } else if (episode != null && SkipStreamingSource.isStreaming(episode.uri)
+                && !isSelectionAvailable()) {
+            scheduleWaveformLoad();
         }
     }
 
@@ -781,7 +848,13 @@ public final class SampleEditorView extends LinearLayout {
             }
             inputHandler.removeCallbacksAndMessages(null);
             if (value.toString().trim().isEmpty()) {
+                if (SkipStreamingSource.isStreaming(episode.uri)) {
+                    cancelClipLoad();
+                }
                 return;
+            }
+            if (SkipStreamingSource.isStreaming(episode.uri)) {
+                cancelClipLoad();
             }
             inputHandler.postDelayed(() -> updateSelectionFromInputs(start), 300);
         }
@@ -816,6 +889,9 @@ public final class SampleEditorView extends LinearLayout {
             cancelSampleExtraction();
         }
         updateWindowForSelection();
+        if (SkipStreamingSource.isStreaming(episode.uri) && isSelectionAvailable()) {
+            scheduleWaveformLoad();
+        }
     }
 
     private int dp(int value) {
@@ -986,19 +1062,22 @@ public final class SampleEditorView extends LinearLayout {
                 } else {
                     waveformView.setRange(windowStart, windowStart + windowLength,
                             selectionStart, selectionEnd);
+                    if (episode != null && SkipStreamingSource.isStreaming(episode.uri)) {
+                        scheduleWaveformLoad();
+                    }
                 }
                 return true;
             }
             if (event.getAction() == MotionEvent.ACTION_UP) {
                 if (handle == 3) {
-                    loadWaveform();
+                    scheduleWaveformLoad();
                 }
                 handle = 0;
                 return performClick();
             }
             if (event.getAction() == MotionEvent.ACTION_CANCEL) {
                 if (handle == 3) {
-                    loadWaveform();
+                    scheduleWaveformLoad();
                 }
                 handle = 0;
                 return true;
