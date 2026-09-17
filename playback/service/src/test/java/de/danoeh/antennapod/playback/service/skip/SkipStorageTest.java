@@ -30,13 +30,15 @@ public class SkipStorageTest {
         AudioFingerprint fingerprint = new AudioFingerprint(8_000, 64, 32, hashes);
         SkipSample sample = new SkipSample("sample", SkipMarker.START, 2_000, 0, 42_000, fingerprint);
         SkipRule rule = new SkipRule("rule", "Intro", true, SkipRule.Type.FIXED, 0, 0,
-                SkipRule.MissingEndBehavior.UNTOUCHED, 0, 5_000, 0, 0, Collections.singletonList(sample));
+                SkipRule.MissingEndBehavior.UNTOUCHED, 0, 5_000, 0, 0,
+                Collections.singletonList(sample)).withUseStartAsEnd(true);
         store.write(feedId, new SkipRuleStore.RuleSet(7, Collections.singletonList(rule)));
         SkipRuleStore.RuleSet restored = new SkipRuleStore(context).read(feedId);
         assertEquals(7, restored.revision);
         assertEquals(fingerprint, restored.rules.get(0).samples.get(0).fingerprint);
         assertEquals(42_000, restored.rules.get(0).samples.get(0).sourcePositionMs);
         assertEquals("Intro", restored.rules.get(0).name);
+        assertTrue(restored.rules.get(0).useStartAsEnd);
     }
 
     @Test
@@ -54,6 +56,33 @@ public class SkipStorageTest {
         } catch (IOException error) {
             assertTrue(error.getMessage().contains("Cannot read"));
         }
+    }
+
+    @Test
+    public void missingSharedMarkerFieldDefaultsToFalse() throws IOException {
+        Context context = ApplicationProvider.getApplicationContext();
+        SkipRuleStore store = new SkipRuleStore(context);
+        String feedId = UUID.randomUUID().toString();
+        int[] hashes = new int[61];
+        Arrays.fill(hashes, 0x456789ab);
+        StringBuilder hashesJson = new StringBuilder();
+        for (int index = 0; index < hashes.length; index++) {
+            if (index > 0) {
+                hashesJson.append(',');
+            }
+            hashesJson.append(hashes[index]);
+        }
+        String sample = "{\"id\":\"%s\",\"marker\":\"%s\",\"durationMs\":2000,"
+                + "\"sampleRate\":8000,\"frameMs\":64,\"hopMs\":32,\"hashes\":[" + hashesJson + "]}";
+        String json = "{\"version\":2,\"rules\":[{\"id\":\"rule\",\"name\":\"Ads\","
+                + "\"type\":\"BETWEEN\",\"samples\":["
+                + String.format(sample, "start", "START") + ","
+                + String.format(sample, "end", "END") + "]}]}";
+        File file = new File(new File(context.getFilesDir(), "skip-rules"), SkipStorageKey.digest(feedId) + ".json");
+        try (FileOutputStream output = new FileOutputStream(file)) {
+            output.write(json.getBytes(StandardCharsets.UTF_8));
+        }
+        assertTrue(!store.read(feedId).rules.get(0).useStartAsEnd);
     }
 
     @Test

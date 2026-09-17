@@ -24,44 +24,279 @@ public final class SkipResolver {
     public static List<SkipOccurrence> resolve(SkipRule rule, List<SkipMarkerHit> hits,
                                                long episodeDurationMs,
                                                List<SkipCoverage> coverage) {
+        return resolveResult(rule, hits, episodeDurationMs, coverage).occurrences;
+    }
+
+    public static List<SkipDetection> resolveDetections(SkipRule rule, List<SkipMarkerHit> hits,
+                                                        long episodeDurationMs,
+                                                        boolean fullWindowAnalyzed,
+                                                        long analyzedUntilMs) {
+        return resolveDetections(rule, hits, episodeDurationMs,
+                fullWindowAnalyzed ? Collections.singletonList(new SkipCoverage(0, analyzedUntilMs))
+                        : Collections.emptyList());
+    }
+
+    public static List<SkipDetection> resolveDetections(SkipRule rule, List<SkipMarkerHit> hits,
+                                                        long episodeDurationMs,
+                                                        List<SkipCoverage> coverage) {
+        return resolveResult(rule, hits, episodeDurationMs, coverage).detections;
+    }
+
+    static Resolution resolveResult(SkipRule rule, List<SkipMarkerHit> hits, long episodeDurationMs,
+                                    List<SkipCoverage> coverage) {
         if (rule == null || !rule.enabled || episodeDurationMs <= 0 || hits == null) {
-            return Collections.emptyList();
+            return new Resolution(Collections.emptyList(), Collections.emptyList());
         }
-        List<SkipMarkerHit> starts = distinctHits(rule, hits, SkipMarker.START, episodeDurationMs);
-        List<SkipMarkerHit> ends = distinctHits(rule, hits, SkipMarker.END, episodeDurationMs);
-        List<SkipOccurrence> result = new ArrayList<>();
-        if (rule.type == SkipRule.Type.FINISH) {
-            for (SkipMarkerHit start : starts) {
-                addOccurrence(result, rule, start.timeMs, episodeDurationMs, start.score);
-            }
-            return result;
-        }
-        if (rule.type == SkipRule.Type.FIXED) {
-            for (SkipMarkerHit start : starts) {
-                long end = start.timeMs + Math.min(rule.fixedDurationMs, episodeDurationMs - start.timeMs);
-                if (rule.fixedDurationMs > 0) {
-                    addOccurrence(result, rule, start.timeMs, end, start.score);
+        List<SkipOccurrence> occurrences = new ArrayList<>();
+        List<SkipDetection> detections = new ArrayList<>();
+        if (rule.type != SkipRule.Type.BETWEEN) {
+            for (SkipMarkerHit start : distinctHits(rule, hits, SkipMarker.START, episodeDurationMs)) {
+                if (rule.type == SkipRule.Type.FINISH) {
+                    addOccurrence(occurrences, rule, start.timeMs, episodeDurationMs, start.score);
+                } else if (rule.fixedDurationMs > 0) {
+                    long end = start.timeMs + Math.min(rule.fixedDurationMs,
+                            episodeDurationMs - start.timeMs);
+                    addOccurrence(occurrences, rule, start.timeMs, end, start.score);
                 }
             }
-            return result;
+            return new Resolution(deduplicateOccurrences(occurrences), detections);
         }
-        for (int index = 0; index < starts.size(); index++) {
-            SkipMarkerHit start = starts.get(index);
-            long nextStart = index + 1 < starts.size() ? starts.get(index + 1).timeMs : episodeDurationMs;
-            long windowEnd = Math.min(nextStart, relevantWindowEnd(rule, start.timeMs, episodeDurationMs));
-            SkipMarkerHit end = firstEndAfter(rule, ends, start.timeMs, windowEnd, nextStart);
-            if (end != null && isCovered(coverage, start.timeMs, end.timeMs)) {
-                addBetween(result, rule, start, end);
-            } else if (end == null && isCovered(coverage, start.timeMs, windowEnd)) {
-                addMissingEnd(result, rule, start, nextStart, episodeDurationMs);
+
+        SkipMarkerHit openStart = null;
+        boolean ambiguousPhaseKnown = false;
+        SkipMarkerHit uncertainStart = null;
+        for (HitOccurrence hit : hitOccurrences(rule, hits, episodeDurationMs)) {
+            if (openStart == null) {
+                if (hit.start != null) {
+                    if (hit.end == null || ambiguousPhaseKnown || uncertainStart == null
+                            && hasPrecedingCoverage(rule, hit.end, episodeDurationMs, coverage)
+                            || uncertainStart != null && cannotPair(rule, uncertainStart,
+                            hit.end, episodeDurationMs)) {
+                        openStart = hit.start;
+                        ambiguousPhaseKnown = true;
+                        uncertainStart = null;
+                    } else {
+                        detections.add(detection(rule, hit.start, SkipDetection.Reason.PENDING));
+                        detections.add(detection(rule, hit.end, SkipDetection.Reason.PENDING));
+                        uncertainStart = hit.start;
+                    }
+                } else {
+                    addMissingStart(detections, rule, hit.end, episodeDurationMs, coverage);
+                    ambiguousPhaseKnown = hasPrecedingCoverage(rule, hit.end, episodeDurationMs, coverage);
+                }
+                continue;
+            }
+            if (hit.end != null && hit.end.timeMs > openStart.timeMs) {
+                long endMs = sampleEnd(rule, hit.end);
+                long intervalMs = endMs - openStart.timeMs;
+                long windowEnd = relevantWindowEnd(rule, openStart.timeMs, episodeDurationMs);
+                boolean maximumEndsWindow = rule.maxDurationMs > 0
+                        && windowEnd == openStart.timeMs + Math.min(rule.maxDurationMs,
+                        episodeDurationMs - openStart.timeMs);
+                if (endMs > windowEnd && !maximumEndsWindow) {
+                    addMissingEnd(occurrences, detections, rule, openStart, episodeDurationMs, coverage);
+                    addMissingStart(detections, rule, hit.end, episodeDurationMs, coverage);
+                    openStart = hit.start;
+                    continue;
+                }
+                if (intervalMs < rule.minDurationMs) {
+                    SkipDetection.Reason reason = isCovered(coverage, openStart.timeMs, hit.end.timeMs)
+                            ? SkipDetection.Reason.TOO_SHORT : SkipDetection.Reason.PENDING;
+                    detections.add(detection(rule, hit.end, reason));
+                    if (hit.start != null) {
+                        detections.add(detection(rule, hit.start, reason));
+                    }
+                    continue;
+                } else if (rule.maxDurationMs > 0 && intervalMs > rule.maxDurationMs) {
+                    if (isCovered(coverage, openStart.timeMs,
+                            relevantWindowEnd(rule, openStart.timeMs, episodeDurationMs))) {
+                        boolean fallback = rule.missingEndBehavior == SkipRule.MissingEndBehavior.FIXED
+                                && rule.missingEndDurationMs > 0;
+                        if (!fallback) {
+                            detections.add(detection(rule, openStart, SkipDetection.Reason.TOO_LONG));
+                        }
+                        detections.add(detection(rule, hit.end, SkipDetection.Reason.TOO_LONG));
+                        if (fallback) {
+                            long duration = Math.min(rule.missingEndDurationMs, rule.maxDurationMs);
+                            addFallback(occurrences, detections, rule, openStart,
+                                    openStart.timeMs + Math.min(duration,
+                                            episodeDurationMs - openStart.timeMs));
+                        }
+                    } else {
+                        detections.add(detection(rule, openStart, SkipDetection.Reason.PENDING));
+                        detections.add(detection(rule, hit.end, SkipDetection.Reason.PENDING));
+                    }
+                    openStart = hit.start;
+                    continue;
+                } else if (!isCovered(coverage, openStart.timeMs, hit.end.timeMs)) {
+                    detections.add(detection(rule, openStart, SkipDetection.Reason.PENDING));
+                    detections.add(detection(rule, hit.end, SkipDetection.Reason.PENDING));
+                    if (hit.start != null) {
+                        detections.add(detection(rule, hit.start, SkipDetection.Reason.PENDING));
+                    }
+                    openStart = null;
+                    ambiguousPhaseKnown = false;
+                    uncertainStart = hit.start;
+                    continue;
+                } else {
+                    addOccurrence(occurrences, rule, openStart.timeMs, endMs,
+                            Math.min(openStart.score, hit.end.score));
+                    openStart = null;
+                    continue;
+                }
+            }
+            if (hit.start != null && hit.start.timeMs > openStart.timeMs) {
+                replaceStart(occurrences, detections, rule, openStart, hit.start.timeMs,
+                        episodeDurationMs, coverage);
+                openStart = hit.start;
             }
         }
-        return deduplicateOccurrences(result);
+        if (openStart != null) {
+            addMissingEnd(occurrences, detections, rule, openStart, episodeDurationMs, coverage);
+        }
+        occurrences = deduplicateOccurrences(occurrences);
+        detections.sort(Comparator.comparingLong((SkipDetection item) -> item.timeMs)
+                .thenComparing(item -> item.marker));
+        return new Resolution(occurrences, detections);
+    }
+
+    private static boolean hasPrecedingCoverage(SkipRule rule, SkipMarkerHit hit,
+                                                long episodeDurationMs, List<SkipCoverage> coverage) {
+        long searchStart = regionStart(rule, hit.timeMs, episodeDurationMs);
+        if (rule.maxDurationMs > 0) {
+            searchStart = Math.max(searchStart, sampleEnd(rule, hit) - rule.maxDurationMs);
+        }
+        return isCovered(coverage, searchStart, hit.timeMs);
+    }
+
+    private static boolean cannotPair(SkipRule rule, SkipMarkerHit start, SkipMarkerHit end,
+                                      long episodeDurationMs) {
+        long endMs = sampleEnd(rule, end);
+        return endMs > relevantWindowEnd(rule, start.timeMs, episodeDurationMs)
+                || rule.maxDurationMs > 0 && endMs - start.timeMs > rule.maxDurationMs;
+    }
+
+    private static long regionStart(SkipRule rule, long timeMs, long episodeDurationMs) {
+        if (rule.lastRegionMs > 0 && timeMs >= episodeDurationMs - rule.lastRegionMs
+                && (rule.firstRegionMs == 0 || timeMs > rule.firstRegionMs)) {
+            return Math.max(0, episodeDurationMs - rule.lastRegionMs);
+        }
+        return 0;
+    }
+
+    private static List<HitOccurrence> hitOccurrences(SkipRule rule, List<SkipMarkerHit> hits,
+                                                       long episodeDurationMs) {
+        List<SkipMarkerHit> matching = new ArrayList<>();
+        for (SkipMarkerHit hit : hits) {
+            if (rule.id.equals(hit.ruleId) && hit.timeMs < episodeDurationMs
+                    && isInRegion(rule, hit.timeMs, episodeDurationMs)
+                    && (hit.marker == SkipMarker.START || !rule.useStartAsEnd)) {
+                matching.add(hit);
+            }
+        }
+        matching.sort(Comparator.comparingLong(hit -> hit.timeMs));
+        List<HitOccurrence> result = new ArrayList<>();
+        long clusterStartMs = -1;
+        for (SkipMarkerHit hit : matching) {
+            if (result.isEmpty() || hit.timeMs - clusterStartMs > SAME_OCCURRENCE_MS) {
+                result.add(new HitOccurrence());
+                clusterStartMs = hit.timeMs;
+            }
+            HitOccurrence occurrence = result.get(result.size() - 1);
+            if (hit.marker == SkipMarker.START) {
+                occurrence.start = better(occurrence.start, hit);
+                if (rule.useStartAsEnd) {
+                    occurrence.end = better(occurrence.end, new SkipMarkerHit(hit.ruleId,
+                            hit.sampleId, SkipMarker.END, hit.timeMs, hit.score));
+                }
+            } else {
+                occurrence.end = better(occurrence.end, hit);
+            }
+        }
+        return result;
+    }
+
+    private static SkipMarkerHit better(SkipMarkerHit existing, SkipMarkerHit candidate) {
+        return existing == null || candidate.score > existing.score ? candidate : existing;
+    }
+
+    private static void addMissingStart(List<SkipDetection> detections, SkipRule rule,
+                                        SkipMarkerHit end, long episodeDurationMs,
+                                        List<SkipCoverage> coverage) {
+        long endMs = sampleEnd(rule, end);
+        long searchStart = regionStart(rule, end.timeMs, episodeDurationMs);
+        if (rule.maxDurationMs > 0) {
+            searchStart = Math.max(searchStart, endMs - rule.maxDurationMs);
+        }
+        SkipDetection.Reason reason = isCovered(coverage, searchStart, end.timeMs)
+                ? SkipDetection.Reason.MISSING_START : SkipDetection.Reason.PENDING;
+        detections.add(detection(rule, end, reason));
+    }
+
+    private static void addMissingEnd(List<SkipOccurrence> occurrences, List<SkipDetection> detections,
+                                      SkipRule rule, SkipMarkerHit start, long episodeDurationMs,
+                                      List<SkipCoverage> coverage) {
+        long windowEnd = relevantWindowEnd(rule, start.timeMs, episodeDurationMs);
+        if (!isCovered(coverage, start.timeMs, windowEnd)) {
+            detections.add(detection(rule, start, SkipDetection.Reason.PENDING));
+            return;
+        }
+        if (rule.missingEndBehavior != SkipRule.MissingEndBehavior.FIXED
+                || rule.missingEndDurationMs <= 0) {
+            detections.add(detection(rule, start, SkipDetection.Reason.MISSING_END));
+            return;
+        }
+        long duration = rule.missingEndDurationMs;
+        if (rule.maxDurationMs > 0) {
+            duration = Math.min(duration, rule.maxDurationMs);
+        }
+        long endMs = start.timeMs + Math.min(duration, episodeDurationMs - start.timeMs);
+        addFallback(occurrences, detections, rule, start, endMs);
+    }
+
+    private static void replaceStart(List<SkipOccurrence> occurrences, List<SkipDetection> detections,
+                                     SkipRule rule, SkipMarkerHit start, long nextStartMs,
+                                     long episodeDurationMs, List<SkipCoverage> coverage) {
+        long searchEnd = Math.min(nextStartMs, relevantWindowEnd(rule, start.timeMs, episodeDurationMs));
+        if (!isCovered(coverage, start.timeMs, searchEnd)) {
+            detections.add(detection(rule, start, SkipDetection.Reason.PENDING));
+            return;
+        }
+        if (rule.missingEndBehavior != SkipRule.MissingEndBehavior.FIXED
+                || rule.missingEndDurationMs <= 0) {
+            detections.add(detection(rule, start, SkipDetection.Reason.REPLACED_START));
+            return;
+        }
+        long duration = rule.missingEndDurationMs;
+        if (rule.maxDurationMs > 0) {
+            duration = Math.min(duration, rule.maxDurationMs);
+        }
+        long endMs = Math.min(nextStartMs, start.timeMs
+                + Math.min(duration, episodeDurationMs - start.timeMs));
+        addFallback(occurrences, detections, rule, start, endMs);
+    }
+
+    private static void addFallback(List<SkipOccurrence> occurrences, List<SkipDetection> detections,
+                                    SkipRule rule, SkipMarkerHit start, long endMs) {
+        if (endMs - start.timeMs < rule.minDurationMs) {
+            detections.add(detection(rule, start, SkipDetection.Reason.TOO_SHORT));
+            return;
+        }
+        addOccurrence(occurrences, rule, start.timeMs, endMs, start.score);
+        detections.add(new SkipDetection(rule.id, SkipMarker.START, start.timeMs, endMs,
+                SkipDetection.Reason.FALLBACK));
+    }
+
+    private static SkipDetection detection(SkipRule rule, SkipMarkerHit hit, SkipDetection.Reason reason) {
+        return new SkipDetection(rule.id, hit.marker, hit.timeMs, hit.timeMs, reason);
     }
 
     private static boolean isCovered(List<SkipCoverage> coverage, long startMs, long endMs) {
-        if (coverage == null || endMs <= startMs) {
+        if (coverage == null || endMs < startMs) {
             return false;
+        }
+        if (endMs == startMs) {
+            return true;
         }
         List<SkipCoverage> sorted = new ArrayList<>(coverage);
         sorted.sort(Comparator.comparingLong(item -> item.startMs));
@@ -111,23 +346,6 @@ public final class SkipResolver {
         return (rule.firstRegionMs == 0 && rule.lastRegionMs == 0) || inFirst || inLast;
     }
 
-    private static SkipMarkerHit firstEndAfter(SkipRule rule, List<SkipMarkerHit> ends,
-                                              long startMs, long windowEndMs, long nextStartMs) {
-        for (SkipMarkerHit end : ends) {
-            long endMs = sampleEnd(rule, end);
-            if (end.timeMs > startMs && end.timeMs < nextStartMs && endMs <= windowEndMs
-                    && endMs - startMs >= rule.minDurationMs) {
-                return end;
-            }
-        }
-        return null;
-    }
-
-    private static void addBetween(List<SkipOccurrence> result, SkipRule rule,
-                                   SkipMarkerHit start, SkipMarkerHit end) {
-        addOccurrence(result, rule, start.timeMs, sampleEnd(rule, end), Math.min(start.score, end.score));
-    }
-
     private static long sampleEnd(SkipRule rule, SkipMarkerHit hit) {
         for (SkipSample sample : rule.samples) {
             if (sample.id.equals(hit.sampleId)) {
@@ -135,24 +353,6 @@ public final class SkipResolver {
             }
         }
         return hit.timeMs;
-    }
-
-    private static void addMissingEnd(List<SkipOccurrence> result, SkipRule rule,
-                                      SkipMarkerHit start, long nextDistinctStart,
-                                      long episodeDurationMs) {
-        if (rule.missingEndBehavior != SkipRule.MissingEndBehavior.FIXED
-                || rule.missingEndDurationMs <= 0) {
-            return;
-        }
-        long duration = rule.missingEndDurationMs;
-        if (rule.maxDurationMs > 0) {
-            duration = Math.min(duration, rule.maxDurationMs);
-        }
-        long end = start.timeMs + Math.min(duration, episodeDurationMs - start.timeMs);
-        if (nextDistinctStart > start.timeMs) {
-            end = Math.min(end, nextDistinctStart);
-        }
-        addOccurrence(result, rule, start.timeMs, Math.min(end, episodeDurationMs), start.score);
     }
 
     private static void addOccurrence(List<SkipOccurrence> result, SkipRule rule, long startMs,
@@ -192,5 +392,20 @@ public final class SkipResolver {
         List<SkipOccurrence> result = new ArrayList<>(byRange.values());
         result.sort(Comparator.comparingLong(occurrence -> occurrence.startMs));
         return result;
+    }
+
+    static final class Resolution {
+        final List<SkipOccurrence> occurrences;
+        final List<SkipDetection> detections;
+
+        Resolution(List<SkipOccurrence> occurrences, List<SkipDetection> detections) {
+            this.occurrences = Collections.unmodifiableList(new ArrayList<>(occurrences));
+            this.detections = Collections.unmodifiableList(new ArrayList<>(detections));
+        }
+    }
+
+    private static final class HitOccurrence {
+        private SkipMarkerHit start;
+        private SkipMarkerHit end;
     }
 }

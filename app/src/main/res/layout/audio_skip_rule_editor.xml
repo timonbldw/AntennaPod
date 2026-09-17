@@ -66,6 +66,13 @@
             android:layout_height="wrap_content"
             android:minHeight="48dp" />
 
+        <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/audioSkipRuleUseStartAsEndInput"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/audio_skip_use_start_as_end"
+            android:visibility="gone" />
+
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"

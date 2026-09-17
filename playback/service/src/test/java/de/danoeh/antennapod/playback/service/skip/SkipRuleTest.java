@@ -6,6 +6,7 @@ import java.util.Arrays;
 import java.util.Collections;
 
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.fail;
 
 public class SkipRuleTest {
@@ -73,5 +74,24 @@ public class SkipRuleTest {
         } catch (IllegalArgumentException error) {
             assertTrue(error.getMessage().contains("duration"));
         }
+    }
+
+    @Test
+    public void sharedStartModeDoesNotRequireEndAndSurvivesCopies() {
+        int[] hashes = new int[61];
+        Arrays.fill(hashes, 0x456789ab);
+        SkipSample sample = new SkipSample("sample", SkipMarker.START, 2_000, 0,
+                new AudioFingerprint(8_000, 64, 32, hashes));
+        SkipRule rule = new SkipRule("id", "Ads", true, SkipRule.Type.BETWEEN, 0, 30_000,
+                SkipRule.MissingEndBehavior.UNTOUCHED, 0, 0, 0, 0,
+                Collections.singletonList(sample)).withUseStartAsEnd(true);
+        rule.validate();
+        assertFalse(new SkipRule("old", "Ads", true, SkipRule.Type.BETWEEN, 0, 30_000,
+                SkipRule.MissingEndBehavior.UNTOUCHED, 0, 0, 0, 0,
+                Arrays.asList(sample, new SkipSample("end", SkipMarker.END, 2_000, 0,
+                        sample.fingerprint))).useStartAsEnd);
+        assertTrue(rule.withSamples(Collections.singletonList(sample)).useStartAsEnd);
+        assertTrue(rule.withEnabled(false).useStartAsEnd);
+        assertFalse(rule.withUseStartAsEnd(false).useStartAsEnd);
     }
 }

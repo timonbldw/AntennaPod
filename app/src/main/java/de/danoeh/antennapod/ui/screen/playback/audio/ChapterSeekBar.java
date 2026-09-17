@@ -2,6 +2,7 @@ package de.danoeh.antennapod.ui.screen.playback.audio;
 
 import android.content.Context;
 import android.graphics.Canvas;
+import android.graphics.Color;
 import android.graphics.Paint;
 import android.os.Handler;
 import android.os.Looper;
@@ -12,6 +13,8 @@ import java.util.List;
 import de.danoeh.antennapod.playback.service.skip.SkipAnalysisSnapshot;
 import de.danoeh.antennapod.playback.service.skip.SkipAnalysisStatus;
 import de.danoeh.antennapod.playback.service.skip.SkipCoverage;
+import de.danoeh.antennapod.playback.service.skip.SkipDetection;
+import de.danoeh.antennapod.playback.service.skip.SkipMarker;
 import de.danoeh.antennapod.playback.service.skip.SkipOccurrence;
 import de.danoeh.antennapod.R;
 import de.danoeh.antennapod.ui.common.Converter;
@@ -33,8 +36,12 @@ public class ChapterSeekBar extends androidx.appcompat.widget.AppCompatSeekBar {
     private final Paint paintCoverage = new Paint();
     private final Paint paintDetected = new Paint();
     private final Paint paintProgressPrimary = new Paint();
+    private final Paint paintDiagnosticError = new Paint();
+    private final Paint paintDiagnosticFallback = new Paint();
+    private final Paint paintDiagnosticPending = new Paint();
     private List<SkipCoverage> analysisCoverage = Collections.emptyList();
     private List<SkipOccurrence> detectedOccurrences = Collections.emptyList();
+    private List<SkipDetection> detections = Collections.emptyList();
     private long analysisDuration;
 
     public ChapterSeekBar(Context context) {
@@ -66,19 +73,35 @@ public class ChapterSeekBar extends androidx.appcompat.widget.AppCompatSeekBar {
         paintDetected.setColor(ThemeUtils.getColorFromAttr(getContext(), R.attr.colorPrimary));
         paintDetected.setAlpha(150);
         paintProgressPrimary.setColor(ThemeUtils.getColorFromAttr(getContext(), R.attr.colorPrimary));
+        paintDiagnosticError.setColor(Color.RED);
+        paintDiagnosticFallback.setColor(Color.rgb(255, 179, 0));
+        paintDiagnosticPending.setColor(ThemeUtils.getColorFromAttr(getContext(), R.attr.colorOnSurfaceVariant));
+        paintDiagnosticPending.setStyle(Paint.Style.STROKE);
+        paintDiagnosticError.setStrokeWidth(Math.max(2, density * 2));
+        paintDiagnosticFallback.setStrokeWidth(Math.max(2, density * 2));
+        paintDiagnosticPending.setStrokeWidth(Math.max(1, density * 1.5f));
     }
 
     public void setSkipAnalysis(SkipAnalysisSnapshot snapshot) {
         if (snapshot == null) {
             analysisCoverage = Collections.emptyList();
             detectedOccurrences = Collections.emptyList();
+            detections = Collections.emptyList();
             analysisDuration = 0;
             setContentDescription(getContext().getString(R.string.audio_skip_playback_not_analyzed));
         } else {
             analysisCoverage = new ArrayList<>(snapshot.coverage);
             detectedOccurrences = new ArrayList<>(snapshot.occurrences);
+            detections = new ArrayList<>(snapshot.detections);
             analysisDuration = snapshot.durationMs;
-            if (!snapshot.occurrences.isEmpty()) {
+            if (!snapshot.occurrences.isEmpty() && !snapshot.detections.isEmpty()) {
+                String diagnostic = diagnosticAccessibility(snapshot.detections.get(0));
+                setContentDescription(getContext().getString(
+                        R.string.audio_skip_playback_detected_count_accessibility,
+                        snapshot.occurrences.size()) + ". " + getContext().getString(
+                        R.string.audio_skip_playback_diagnostics_count_accessibility,
+                        snapshot.detections.size()) + ". " + diagnostic);
+            } else if (!snapshot.occurrences.isEmpty()) {
                 SkipOccurrence occurrence = snapshot.occurrences.get(0);
                 setContentDescription(getContext().getString(
                         R.string.audio_skip_playback_detected_count_accessibility,
@@ -86,6 +109,11 @@ public class ChapterSeekBar extends androidx.appcompat.widget.AppCompatSeekBar {
                         R.string.audio_skip_playback_detected_accessibility,
                         Converter.getDurationStringLong((int) occurrence.startMs),
                         Converter.getDurationStringLong((int) occurrence.endMs)));
+            } else if (!snapshot.detections.isEmpty()) {
+                setContentDescription(getContext().getString(
+                        R.string.audio_skip_playback_diagnostics_count_accessibility,
+                        snapshot.detections.size()) + ". "
+                        + diagnosticAccessibility(snapshot.detections.get(0)));
             } else if (!snapshot.coverage.isEmpty()) {
                 SkipCoverage coverage = snapshot.coverage.get(0);
                 setContentDescription(getContext().getString(
@@ -101,6 +129,38 @@ public class ChapterSeekBar extends androidx.appcompat.widget.AppCompatSeekBar {
             }
         }
         invalidate();
+    }
+
+    private String diagnosticAccessibility(SkipDetection detection) {
+        String role = getContext().getString(detection.marker == SkipMarker.START
+                ? R.string.audio_skip_playback_start_marker
+                : R.string.audio_skip_playback_end_marker);
+        String reason = getContext().getString(diagnosticReason(detection.reason));
+        String time = Converter.getDurationStringLong((int) detection.timeMs);
+        return detection.reason == SkipDetection.Reason.FALLBACK
+                ? getContext().getString(R.string.audio_skip_playback_diagnostic_fallback, time,
+                Converter.getDurationStringLong((int) detection.endMs), role, reason)
+                : getContext().getString(R.string.audio_skip_playback_diagnostic, time, role, reason);
+    }
+
+    private int diagnosticReason(SkipDetection.Reason reason) {
+        switch (reason) {
+            case MISSING_END:
+                return R.string.audio_skip_playback_reason_missing_end;
+            case MISSING_START:
+                return R.string.audio_skip_playback_reason_missing_start;
+            case TOO_SHORT:
+                return R.string.audio_skip_playback_reason_too_short;
+            case TOO_LONG:
+                return R.string.audio_skip_playback_reason_too_long;
+            case REPLACED_START:
+                return R.string.audio_skip_playback_reason_replaced_start;
+            case FALLBACK:
+                return R.string.audio_skip_playback_reason_fallback;
+            case PENDING:
+            default:
+                return R.string.audio_skip_playback_reason_pending;
+        }
     }
 
     /**
@@ -144,6 +204,7 @@ public class ChapterSeekBar extends androidx.appcompat.widget.AppCompatSeekBar {
         } else {
             drawProgressChapters(canvas);
         }
+        drawDiagnostics(canvas);
         drawThumb(canvas);
     }
 
@@ -199,6 +260,31 @@ public class ChapterSeekBar extends androidx.appcompat.widget.AppCompatSeekBar {
         for (SkipOccurrence occurrence : detectedOccurrences) {
             drawRange(canvas, occurrence.startMs, occurrence.endMs, paintDetected);
         }
+    }
+
+    private void drawDiagnostics(Canvas canvas) {
+        if (analysisDuration <= 0) {
+            return;
+        }
+        final int saveCount = canvas.save();
+        canvas.translate(getPaddingLeft(), getPaddingTop());
+        for (SkipDetection detection : detections) {
+            if (detection.reason == SkipDetection.Reason.FALLBACK) {
+                drawRange(canvas, detection.timeMs, detection.endMs, paintDiagnosticFallback);
+            }
+        }
+        for (SkipDetection detection : detections) {
+            Paint paint = detection.reason == SkipDetection.Reason.PENDING
+                    ? paintDiagnosticPending : detection.reason == SkipDetection.Reason.FALLBACK
+                    ? paintDiagnosticFallback : paintDiagnosticError;
+            float x = Math.max(0, Math.min(width, detection.timeMs / (float) analysisDuration * width));
+            if (detection.reason == SkipDetection.Reason.PENDING) {
+                canvas.drawCircle(x, center, density * 3, paint);
+            } else {
+                canvas.drawLine(x, top - density, x, bottom + density, paint);
+            }
+        }
+        canvas.restoreToCount(saveCount);
     }
 
     private void drawRange(Canvas canvas, long startMs, long endMs, Paint paint) {
