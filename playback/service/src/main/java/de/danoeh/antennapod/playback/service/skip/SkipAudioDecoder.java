@@ -28,6 +28,17 @@ final class SkipAudioDecoder {
 
     static DecodedAudio decode(Context context, Uri uri, long startMs, long endMs, boolean fetchMissing)
             throws IOException, InterruptedException {
+        return decode(context, uri, startMs, endMs, fetchMissing, false);
+    }
+
+    static DecodedAudio decodePreview(Context context, Uri uri, long startMs, long endMs,
+                                      boolean fetchMissing) throws IOException, InterruptedException {
+        return decode(context, uri, startMs, endMs, fetchMissing, true);
+    }
+
+    private static DecodedAudio decode(Context context, Uri uri, long startMs, long endMs,
+                                       boolean fetchMissing, boolean preserveSourceAudio)
+            throws IOException, InterruptedException {
         if (uri == null || startMs < 0 || endMs <= startMs || endMs - startMs > MAX_WINDOW_MS) {
             throw new IllegalArgumentException("Invalid decode range");
         }
@@ -67,17 +78,20 @@ final class SkipAudioDecoder {
                 streamingSource.throwIfInterrupted();
                 streamingSource.throwIfUnavailable();
             }
+            int sampleRate = inputFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE);
+            int channels = inputFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT);
             PcmAccumulator accumulator = new PcmAccumulator(startMs, endMs);
+            NativePcmAccumulator previewAccumulator = preserveSourceAudio
+                    ? new NativePcmAccumulator(startMs, endMs, sampleRate, channels) : null;
             MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
             boolean inputEnded = false;
             boolean outputEnded = false;
             boolean sourceEnded = false;
             int idleIterations = 0;
-            int sampleRate = inputFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE);
-            int channels = inputFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT);
             int encoding = AudioFormat.ENCODING_PCM_16BIT;
             double previousEndUs = -1;
-            while (!outputEnded && !accumulator.reachedEnd()) {
+            while (!outputEnded && (previewAccumulator == null
+                    ? !accumulator.reachedEnd() : !previewAccumulator.reachedEnd())) {
                 if (Thread.currentThread().isInterrupted()) {
                     throw new InterruptedException();
                 }
@@ -114,6 +128,9 @@ final class SkipAudioDecoder {
                     encoding = format.containsKey(MediaFormat.KEY_PCM_ENCODING)
                             ? format.getInteger(MediaFormat.KEY_PCM_ENCODING) : AudioFormat.ENCODING_PCM_16BIT;
                     idleIterations = 0;
+                    if (previewAccumulator != null) {
+                        previewAccumulator.setFormat(sampleRate, channels);
+                    }
                 } else if (outputIndex == MediaCodec.INFO_TRY_AGAIN_LATER) {
                     if (++idleIterations > MAX_IDLE_ITERATIONS) {
                         throw new IOException("Audio decoder stalled");
@@ -138,15 +155,25 @@ final class SkipAudioDecoder {
                             } else if (previousEndUs >= 0 && timeUs < previousEndUs - 2_000) {
                                 throw new IOException("Non-monotonic audio timestamps");
                             }
+                            float[] frameSamples = previewAccumulator == null ? null : new float[channels];
+                            float sum = 0;
                             for (int frame = 0; frame < frames; frame++) {
                                 if ((frame & 1023) == 0 && Thread.currentThread().isInterrupted()) {
                                     throw new InterruptedException();
                                 }
-                                float sum = 0;
                                 for (int channel = 0; channel < channels; channel++) {
-                                    sum += readSample(buffer, encoding);
+                                    float sample = readSample(buffer, encoding);
+                                    if (frameSamples != null) {
+                                        frameSamples[channel] = sample;
+                                    }
+                                    sum += sample;
                                 }
-                                accumulator.append(sum / channels, timeUs + frame * frameUs, frameUs);
+                                if (frameSamples != null) {
+                                    previewAccumulator.append(frameSamples, timeUs + frame * frameUs, frameUs);
+                                } else {
+                                    accumulator.append(sum / channels, timeUs + frame * frameUs, frameUs);
+                                }
+                                sum = 0;
                             }
                             previousEndUs = timeUs + frames * frameUs;
                         }
@@ -159,6 +186,9 @@ final class SkipAudioDecoder {
             if (streamingSource != null) {
                 streamingSource.throwIfInterrupted();
                 streamingSource.throwIfUnavailable();
+            }
+            if (previewAccumulator != null) {
+                return previewAccumulator.result(sourceEnded && outputEnded);
             }
             return accumulator.result(sourceEnded && outputEnded, previousEndUs);
         } catch (IOException | RuntimeException e) {
@@ -239,17 +269,78 @@ final class SkipAudioDecoder {
         final long durationMs;
         final boolean complete;
         final boolean eof;
+        final int sampleRate;
+        final int channels;
 
         DecodedAudio(long startMs, float[] samples, long durationMs, boolean complete) {
             this(startMs, samples, durationMs, complete, false);
         }
 
         DecodedAudio(long startMs, float[] samples, long durationMs, boolean complete, boolean eof) {
+            this(startMs, samples, durationMs, complete, eof, SkipFingerprint.SAMPLE_RATE, 1);
+        }
+
+        DecodedAudio(long startMs, float[] samples, long durationMs, boolean complete, boolean eof,
+                     int sampleRate, int channels) {
             this.startMs = startMs;
             this.samples = samples;
             this.durationMs = durationMs;
             this.complete = complete;
             this.eof = eof;
+            this.sampleRate = sampleRate;
+            this.channels = channels;
+        }
+    }
+
+    static final class NativePcmAccumulator {
+        private final long startUs;
+        private final long endUs;
+        private float[] values;
+        private int sampleRate;
+        private int channels;
+        private int size;
+        private long lastEndUs = -1;
+
+        NativePcmAccumulator(long startMs, long endMs, int sampleRate, int channels) {
+            startUs = startMs * 1_000L;
+            endUs = endMs * 1_000L;
+            this.sampleRate = sampleRate;
+            this.channels = channels;
+            values = new float[Math.max(1, (int) ((endMs - startMs) * sampleRate / 1_000) * channels)];
+        }
+
+        void setFormat(int sampleRate, int channels) throws IOException {
+            if (size > 0 && (this.sampleRate != sampleRate || this.channels != channels)) {
+                throw new IOException("Audio decoder output format changed");
+            }
+            this.sampleRate = sampleRate;
+            this.channels = channels;
+            values = new float[Math.max(1, (int) ((endUs - startUs) * sampleRate / 1_000_000) * channels)];
+        }
+
+        void append(float[] frame, double timeUs, double frameUs) {
+            double frameEndUs = timeUs + frameUs;
+            if (timeUs < startUs || timeUs >= endUs) {
+                return;
+            }
+            if (size + channels > values.length) {
+                values = Arrays.copyOf(values, values.length + Math.max(channels, values.length));
+            }
+            System.arraycopy(frame, 0, values, size, channels);
+            size += channels;
+            lastEndUs = (long) Math.min(frameEndUs, endUs);
+        }
+
+        boolean reachedEnd() {
+            return lastEndUs >= endUs;
+        }
+
+        DecodedAudio result(boolean eof) throws IOException {
+            if (size == 0) {
+                throw new IOException("Audio decoder produced no samples in requested window");
+            }
+            return new DecodedAudio(startUs / 1_000L, Arrays.copyOf(values, size),
+                    size / channels * 1_000L / sampleRate, reachedEnd() || eof, eof, sampleRate, channels);
         }
     }
 

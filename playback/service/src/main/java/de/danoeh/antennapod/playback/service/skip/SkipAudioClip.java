@@ -11,7 +11,6 @@ import java.io.OutputStream;
 
 public final class SkipAudioClip implements AutoCloseable {
     private static final long MAX_DURATION_MS = 30_000;
-    private static final int SAMPLE_RATE = 8_000;
     public final Uri uri;
     public final long startMs;
     public final long endMs;
@@ -35,18 +34,18 @@ public final class SkipAudioClip implements AutoCloseable {
                 || startMs < 0 || endMs <= startMs || endMs - startMs > MAX_DURATION_MS) {
             throw new IllegalArgumentException("Invalid clip source or range");
         }
-        SkipAudioDecoder.DecodedAudio audio = SkipAudioDecoder.decode(
+        SkipAudioDecoder.DecodedAudio audio = SkipAudioDecoder.decodePreview(
                 context, syntheticUri, startMs, endMs, fetchMissing);
-        int expectedSamples = (int) ((endMs - startMs) * SAMPLE_RATE / 1_000);
-        if (!audio.complete || audio.startMs != startMs || audio.samples.length < expectedSamples) {
+        if (!audio.complete || audio.startMs != startMs || audio.samples.length == 0) {
             throw new SkipStreamingSource.UnavailableException("Requested clip is not fully cached");
         }
+        int sampleCount = audio.samples.length;
         File file = File.createTempFile("skip-clip-", ".wav", context.getCacheDir());
         boolean success = false;
         try {
             try (OutputStream output = new BufferedOutputStream(new FileOutputStream(file))) {
-                writeHeader(output, expectedSamples * 2);
-                for (int index = 0; index < expectedSamples; index++) {
+                writeHeader(output, sampleCount * 2, audio.sampleRate, audio.channels);
+                for (int index = 0; index < sampleCount; index++) {
                     if ((index & 4095) == 0 && Thread.currentThread().isInterrupted()) {
                         throw new InterruptedException();
                     }
@@ -65,16 +64,17 @@ public final class SkipAudioClip implements AutoCloseable {
         }
     }
 
-    private static void writeHeader(OutputStream output, int dataSize) throws IOException {
+    private static void writeHeader(OutputStream output, int dataSize, int sampleRate, int channels)
+            throws IOException {
         writeAscii(output, "RIFF");
         writeInt(output, 36 + dataSize);
         writeAscii(output, "WAVEfmt ");
         writeInt(output, 16);
         writeShort(output, 1);
-        writeShort(output, 1);
-        writeInt(output, SAMPLE_RATE);
-        writeInt(output, SAMPLE_RATE * 2);
-        writeShort(output, 2);
+        writeShort(output, channels);
+        writeInt(output, sampleRate);
+        writeInt(output, sampleRate * channels * 2);
+        writeShort(output, channels * 2);
         writeShort(output, 16);
         writeAscii(output, "data");
         writeInt(output, dataSize);

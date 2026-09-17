@@ -542,7 +542,9 @@ public final class SkipManager {
             long decodeStart = Math.max(0, startMs - overlapMs);
             decodeStart -= decodeStart % SkipFingerprint.HOP_MS;
             long decodeEnd = Math.min(durationMs, endMs + overlapMs + SkipFingerprint.FRAME_MS);
-            SkipAudioDecoder.DecodedAudio decoded = SkipAudioDecoder.decode(context, audioUri, decodeStart, decodeEnd);
+            SkipAudioDecoder.DecodedAudio decoded = SkipStreamingSource.isStreaming(audioUri)
+                    ? SkipAudioDecoder.decode(context, audioUri, decodeStart, decodeEnd, true)
+                    : SkipAudioDecoder.decode(context, audioUri, decodeStart, decodeEnd);
             checkCancelled();
             if (reusableSource(audioUri) && !identity.equals(sourceIdentity(audioUri))) {
                 throw new IOException("Audio source changed during decoding");
