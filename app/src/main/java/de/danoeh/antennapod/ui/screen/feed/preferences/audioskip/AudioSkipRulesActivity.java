@@ -42,6 +42,7 @@ import de.danoeh.antennapod.playback.service.skip.SkipCoverage;
 import de.danoeh.antennapod.playback.service.skip.SkipMarker;
 import de.danoeh.antennapod.playback.service.skip.SkipRule;
 import de.danoeh.antennapod.playback.service.skip.SkipSample;
+import de.danoeh.antennapod.playback.service.skip.SkipStreamingSource;
 import de.danoeh.antennapod.playback.service.skip.SkipTask;
 import de.danoeh.antennapod.ui.common.ToolbarActivity;
 import io.reactivex.rxjava3.android.schedulers.AndroidSchedulers;
@@ -56,6 +57,7 @@ public class AudioSkipRulesActivity extends ToolbarActivity {
     public static final String EXTRA_EPISODE_ID = "episodeId";
     public static final String EXTRA_EPISODE_URI = "episodeUri";
     public static final String EXTRA_POSITION = "position";
+    public static final String EXTRA_DURATION = "duration";
 
     private static final String STATE_SCREEN = "screen";
     private static final String STATE_RULE_ID = "ruleId";
@@ -109,6 +111,7 @@ public class AudioSkipRulesActivity extends ToolbarActivity {
     private long pendingTestEnd = -1;
     private long testPreviewStartedAt;
     private Spinner testEpisodeInput;
+    private Button testRuleButton;
     private List<SampleEditorView.EpisodeInfo> testEpisodes = Collections.emptyList();
     private boolean sampleVisible;
     private boolean playerOrigin;
@@ -365,7 +368,8 @@ public class AudioSkipRulesActivity extends ToolbarActivity {
         durationSettingsButton.setOnClickListener(view -> showDurationSettingsDialog());
         searchSettingsButton.setOnClickListener(view -> showSearchSettingsDialog());
         validation = root.findViewById(R.id.audioSkipValidation);
-        root.findViewById(R.id.audioSkipTestRule).setOnClickListener(view -> testRule());
+        testRuleButton = root.findViewById(R.id.audioSkipTestRule);
+        testRuleButton.setOnClickListener(view -> testRule());
         root.findViewById(R.id.audioSkipCancelRule).setOnClickListener(view -> {
             if (playerOrigin) {
                 finish();
@@ -582,6 +586,7 @@ public class AudioSkipRulesActivity extends ToolbarActivity {
                 playerOrigin ? getIntent().getLongExtra(EXTRA_EPISODE_ID, -1) : -1,
                 playerOrigin ? getIntent().getStringExtra(EXTRA_EPISODE_URI) : null,
                 preferredPosition,
+                playerOrigin ? getIntent().getLongExtra(EXTRA_DURATION, -1) : -1,
                 result -> {
                     List<SkipSample> samples = new ArrayList<>(this.draft.samples);
                     if (result.replaceIndex >= 0 && result.replaceIndex < samples.size()) {
@@ -617,6 +622,10 @@ public class AudioSkipRulesActivity extends ToolbarActivity {
             return;
         }
         SampleEditorView.EpisodeInfo episode = testEpisodes.get(testEpisodeInput.getSelectedItemPosition());
+        if (SkipStreamingSource.isStreaming(episode.uri)) {
+            setValidation(R.string.audio_skip_stream_test_download_required, true);
+            return;
+        }
         if (testTask != null) {
             testTask.cancel();
         }
@@ -803,13 +812,32 @@ public class AudioSkipRulesActivity extends ToolbarActivity {
                     || testEpisodeInput == null) {
                 return;
             }
-            testEpisodes = episodes;
+            List<SampleEditorView.EpisodeInfo> availableEpisodes = new ArrayList<>(episodes);
+            String source = playerOrigin ? getIntent().getStringExtra(EXTRA_EPISODE_URI) : null;
+            Uri sourceUri = source == null ? null : Uri.parse(source);
+            if (SkipStreamingSource.isStreaming(sourceUri)) {
+                availableEpisodes.add(0, new SampleEditorView.EpisodeInfo(
+                        getIntent().getLongExtra(EXTRA_EPISODE_ID, -1),
+                        getString(R.string.audio_skip_current_streamed_episode), sourceUri,
+                        getIntent().getLongExtra(EXTRA_DURATION, -1)));
+            }
+            testEpisodes = availableEpisodes;
             List<String> labels = new ArrayList<>();
-            for (SampleEditorView.EpisodeInfo episode : episodes) {
+            for (SampleEditorView.EpisodeInfo episode : availableEpisodes) {
                 labels.add(episode.title == null ? episode.uri.toString() : episode.title);
             }
             testEpisodeInput.setAdapter(new ArrayAdapter<>(this,
                     android.R.layout.simple_spinner_dropdown_item, labels));
+            testEpisodeInput.setOnItemSelectedListener(new SimpleItemSelectedListener(position -> {
+                boolean streaming = position >= 0 && position < testEpisodes.size()
+                        && SkipStreamingSource.isStreaming(testEpisodes.get(position).uri);
+                testRuleButton.setEnabled(!streaming);
+                if (streaming) {
+                    setValidation(R.string.audio_skip_stream_test_download_required, false);
+                } else {
+                    setValidation("", false);
+                }
+            }));
         });
     }
 
