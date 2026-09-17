@@ -11,39 +11,47 @@
         android:layout_height="wrap_content"
         android:orientation="vertical"
         android:paddingHorizontal="16dp"
-        android:paddingTop="16dp"
-        android:paddingBottom="24dp">
+        android:paddingTop="12dp"
+        android:paddingBottom="16dp">
 
         <TextView
-            android:id="@+id/audioSkipDurationsSection"
             style="@style/TextAppearance.Material3.TitleMedium"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginBottom="12dp"
+            android:layout_marginBottom="8dp"
             android:text="@string/audio_skip_behavior_section" />
 
-        <com.google.android.material.textfield.TextInputLayout
+        <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:hint="@string/audio_skip_rule_name"
-            app:placeholderText="@string/audio_skip_rule_name_hint"
-            style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox">
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
 
-            <com.google.android.material.textfield.TextInputEditText
-                android:id="@+id/audioSkipRuleNameInput"
-                android:layout_width="match_parent"
+            <com.google.android.material.textfield.TextInputLayout
+                style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
+                android:layout_width="0dp"
                 android:layout_height="wrap_content"
-                android:inputType="textCapSentences"
-                android:singleLine="true" />
+                android:layout_weight="1"
+                android:hint="@string/audio_skip_rule_name"
+                app:placeholderText="@string/audio_skip_rule_name_hint">
 
-        </com.google.android.material.textfield.TextInputLayout>
+                <com.google.android.material.textfield.TextInputEditText
+                    android:id="@+id/audioSkipRuleNameInput"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:inputType="textCapSentences"
+                    android:singleLine="true" />
 
-        <com.google.android.material.materialswitch.MaterialSwitch
-            android:id="@+id/audioSkipRuleEnabledInput"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginVertical="8dp"
-            android:text="@string/audio_skip_enabled" />
+            </com.google.android.material.textfield.TextInputLayout>
+
+            <com.google.android.material.materialswitch.MaterialSwitch
+                android:id="@+id/audioSkipRuleEnabledInput"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:contentDescription="@string/audio_skip_enabled" />
+
+        </LinearLayout>
 
         <TextView
             android:layout_width="match_parent"
@@ -59,186 +67,9 @@
             android:minHeight="48dp" />
 
         <TextView
-            style="@style/TextAppearance.Material3.TitleMedium"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="24dp"
-            android:layout_marginBottom="12dp"
-            android:text="@string/audio_skip_durations_section" />
-
-        <com.google.android.material.textfield.TextInputLayout
-            android:id="@+id/audioSkipMinDurationLayout"
-            style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:hint="@string/audio_skip_min_duration"
-            app:placeholderText="@string/audio_skip_timestamp_hint">
-
-            <com.google.android.material.textfield.TextInputEditText
-                android:id="@+id/audioSkipMinDurationInput"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:inputType="text"
-                android:singleLine="true" />
-
-        </com.google.android.material.textfield.TextInputLayout>
-
-        <com.google.android.material.textfield.TextInputLayout
-            android:id="@+id/audioSkipMaxDurationLayout"
-            style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="12dp"
-            android:hint="@string/audio_skip_max_duration"
-            app:placeholderText="@string/audio_skip_timestamp_hint">
-
-            <com.google.android.material.textfield.TextInputEditText
-                android:id="@+id/audioSkipMaxDurationInput"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:inputType="text"
-                android:singleLine="true" />
-
-        </com.google.android.material.textfield.TextInputLayout>
-
-        <com.google.android.material.textfield.TextInputLayout
-            android:id="@+id/audioSkipFixedDurationLayout"
-            style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:hint="@string/audio_skip_fixed_duration"
-            app:placeholderText="@string/audio_skip_timestamp_hint">
-
-            <com.google.android.material.textfield.TextInputEditText
-                android:id="@+id/audioSkipFixedDurationInput"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:inputType="text"
-                android:singleLine="true" />
-
-        </com.google.android.material.textfield.TextInputLayout>
-
-        <LinearLayout
-            android:id="@+id/audioSkipMissingEndLayout"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:orientation="vertical">
-
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:labelFor="@id/audioSkipMissingEndInput"
-                android:text="@string/audio_skip_missing_end"
-                android:textColor="?attr/colorOnSurfaceVariant" />
-
-            <Spinner
-                android:id="@+id/audioSkipMissingEndInput"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:minHeight="48dp" />
-
-        </LinearLayout>
-
-        <com.google.android.material.textfield.TextInputLayout
-            android:id="@+id/audioSkipMissingDurationLayout"
-            style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:hint="@string/audio_skip_missing_duration"
-            app:placeholderText="@string/audio_skip_timestamp_hint">
-
-            <com.google.android.material.textfield.TextInputEditText
-                android:id="@+id/audioSkipMissingDurationInput"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:inputType="text"
-                android:singleLine="true" />
-
-        </com.google.android.material.textfield.TextInputLayout>
-
-        <TextView
-            style="@style/TextAppearance.Material3.TitleMedium"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="24dp"
-            android:layout_marginBottom="12dp"
-            android:text="@string/audio_skip_search_section" />
-
-        <com.google.android.material.textfield.TextInputLayout
-            style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:hint="@string/audio_skip_first_region"
-            app:placeholderText="@string/audio_skip_timestamp_hint">
-
-            <com.google.android.material.textfield.TextInputEditText
-                android:id="@+id/audioSkipFirstRegionInput"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:inputType="text"
-                android:singleLine="true" />
-
-        </com.google.android.material.textfield.TextInputLayout>
-
-        <com.google.android.material.textfield.TextInputLayout
-            style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:hint="@string/audio_skip_last_region"
-            app:placeholderText="@string/audio_skip_timestamp_hint">
-
-            <com.google.android.material.textfield.TextInputEditText
-                android:id="@+id/audioSkipLastRegionInput"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:inputType="text"
-                android:singleLine="true" />
-
-        </com.google.android.material.textfield.TextInputLayout>
-
-        <TextView
-            style="@style/TextAppearance.Material3.TitleMedium"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="24dp"
-            android:layout_marginBottom="12dp"
-            android:text="@string/audio_skip_rule_samples" />
-
-        <LinearLayout
-            android:id="@+id/audioSkipSampleContainer"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="vertical" />
-
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/audioSkipAddStartSample"
-            style="@style/Widget.Material3.Button.TonalButton"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:text="@string/audio_skip_add_start_sample" />
-
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/audioSkipAddEndSample"
-            style="@style/Widget.Material3.Button.TonalButton"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="@string/audio_skip_add_end_sample" />
-
-        <TextView
-            style="@style/TextAppearance.Material3.TitleMedium"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="24dp"
-            android:layout_marginBottom="12dp"
-            android:text="@string/audio_skip_test_section" />
-
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
             android:labelFor="@id/audioSkipTestEpisodeInput"
             android:text="@string/audio_skip_source_episode"
             android:textColor="?attr/colorOnSurfaceVariant" />
@@ -250,10 +81,78 @@
             android:minHeight="48dp" />
 
         <TextView
+            style="@style/TextAppearance.Material3.TitleMedium"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:layout_marginBottom="8dp"
+            android:text="@string/audio_skip_rule_samples" />
+
+        <LinearLayout
+            android:id="@+id/audioSkipSampleContainer"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical" />
+
+        <LinearLayout
+            android:id="@+id/audioSkipSampleActions"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:orientation="horizontal">
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/audioSkipAddStartSample"
+                style="@style/Widget.Material3.Button.TonalButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="4dp"
+                android:layout_weight="1"
+                android:text="@string/audio_skip_add_start_sample" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/audioSkipAddEndSample"
+                style="@style/Widget.Material3.Button.TonalButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="4dp"
+                android:layout_weight="1"
+                android:text="@string/audio_skip_add_end_sample" />
+
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/audioSkipSettingsActions"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:orientation="horizontal">
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/audioSkipDurationSettingsButton"
+                style="@style/Widget.Material3.Button.TextButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="4dp"
+                android:layout_weight="1"
+                android:text="@string/audio_skip_duration_settings" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/audioSkipSearchSettingsButton"
+                style="@style/Widget.Material3.Button.TextButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="4dp"
+                android:layout_weight="1"
+                android:text="@string/audio_skip_search_settings" />
+
+        </LinearLayout>
+
+        <TextView
             android:id="@+id/audioSkipValidation"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginVertical="8dp"
+            android:layout_marginVertical="4dp"
             android:accessibilityLiveRegion="polite"
             android:textColor="?attr/colorError" />
 
@@ -262,12 +161,13 @@
             style="@style/Widget.Material3.Button.OutlinedButton"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
             android:text="@string/audio_skip_test_rule" />
 
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
+            android:layout_marginTop="12dp"
             android:gravity="end"
             android:orientation="horizontal">
 
