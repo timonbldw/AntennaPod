@@ -36,6 +36,7 @@ import de.danoeh.antennapod.playback.service.PlaybackServiceStarter;
 import de.danoeh.antennapod.playback.service.skip.SkipAnalysisSnapshot;
 import de.danoeh.antennapod.playback.service.skip.SkipAnalysisStatus;
 import de.danoeh.antennapod.playback.service.skip.SkipManager;
+import de.danoeh.antennapod.playback.service.skip.SkipStreamingSource;
 import de.danoeh.antennapod.playback.service.skip.SkipSubscription;
 import de.danoeh.antennapod.storage.database.DBReader;
 import de.danoeh.antennapod.storage.preferences.PlaybackPreferences;
@@ -366,7 +367,7 @@ public class AudioPlayerFragment extends Fragment implements
         }
         final FeedMedia observedMedia = currentMedia;
         PlaybackController.bindToMedia3Service(getActivity(), controller -> {
-            boolean localPlayback = isCurrentLocalPlayback(controller, observedMedia);
+            Uri sourceUri = getCurrentSkipSource(controller, observedMedia);
             if (getActivity() != null) {
                 getActivity().runOnUiThread(() -> {
                     if (!isAdded() || getView() == null || currentMedia == null
@@ -374,7 +375,7 @@ public class AudioPlayerFragment extends Fragment implements
                             || generation != skipSourceGeneration || sbPosition == null) {
                         return;
                     }
-                    if (!localPlayback) {
+                    if (sourceUri == null) {
                         addSkipRuleButton.setVisibility(View.VISIBLE);
                         addSkipRuleButton.setEnabled(false);
                         addSkipRuleButton.setText(R.string.audio_skip_download_required);
@@ -385,7 +386,7 @@ public class AudioPlayerFragment extends Fragment implements
                     addSkipRuleButton.setEnabled(true);
                     addSkipRuleButton.setText(R.string.audio_skip_add_rule_short);
                     addSkipRuleButton.setContentDescription(addSkipRuleButton.getText());
-                    observeSkipSnapshot(generation, observedMedia);
+                    observeSkipSnapshot(generation, observedMedia, sourceUri);
                 });
             }
         });
@@ -404,11 +405,28 @@ public class AudioPlayerFragment extends Fragment implements
                 && Uri.parse(media.getLocalFileUrl()).equals(item.localConfiguration.uri);
     }
 
-    private void observeSkipSnapshot(int generation, FeedMedia media) {
+    private Uri getCurrentSkipSource(MediaController controller, FeedMedia media) {
+        if (controller.getDeviceInfo().playbackType == DeviceInfo.PLAYBACK_TYPE_REMOTE) {
+            return null;
+        }
+        MediaItem item = controller.getCurrentMediaItem();
+        if (item == null || item.localConfiguration == null || !String.valueOf(media.getId()).equals(item.mediaId)) {
+            return null;
+        }
+        if (isCurrentLocalPlayback(controller, media)) {
+            return Uri.parse(media.getLocalFileUrl());
+        }
+        Uri source = SkipStreamingSource.getSource(item.localConfiguration.uri);
+        return source != null && SkipStreamingSource.isAvailable(source) ? source : null;
+    }
+
+    private void observeSkipSnapshot(int generation, FeedMedia media, Uri sourceUri) {
         SkipManager manager = SkipManager.getInstance(requireContext());
         SkipAnalysisSnapshot initialSnapshot = manager.getSnapshot(skipFeedId, skipEpisodeId);
-        sbPosition.setSkipAnalysis(initialSnapshot);
-        updateSkipAnalysisButton(initialSnapshot);
+        if (matchesSource(initialSnapshot, sourceUri)) {
+            sbPosition.setSkipAnalysis(initialSnapshot);
+            updateSkipAnalysisButton(initialSnapshot);
+        }
         final String observedFeedId = skipFeedId;
         final String observedEpisodeId = skipEpisodeId;
         skipSubscription = manager.observe(skipFeedId, skipEpisodeId, snapshot -> {
@@ -419,6 +437,7 @@ public class AudioPlayerFragment extends Fragment implements
                             || generation != skipSourceGeneration
                             || !observedFeedId.equals(snapshot.feedId)
                             || !observedEpisodeId.equals(snapshot.episodeId)
+                            || !matchesSource(snapshot, sourceUri)
                             || sbPosition == null) {
                         return;
                     }
@@ -429,6 +448,12 @@ public class AudioPlayerFragment extends Fragment implements
         });
     }
 
+    private boolean matchesSource(SkipAnalysisSnapshot snapshot, Uri sourceUri) {
+        return snapshot != null && (snapshot.status == SkipAnalysisStatus.NOT_ANALYZED
+                || !SkipStreamingSource.isStreaming(sourceUri)
+                || sourceUri.toString().equals(snapshot.sourceIdentity));
+    }
+
     private void updateSkipAnalysisButton(SkipAnalysisSnapshot snapshot) {
         if (snapshot == null || snapshot.status == SkipAnalysisStatus.NOT_ANALYZED) {
             skipAnalysisButton.setVisibility(View.GONE);
@@ -436,10 +461,18 @@ public class AudioPlayerFragment extends Fragment implements
         }
         skipAnalysisButton.setVisibility(View.VISIBLE);
         skipAnalysisButton.setEnabled((snapshot.status == SkipAnalysisStatus.ANALYZING
+                || snapshot.status == SkipAnalysisStatus.WINDOW_READY
                 || snapshot.status == SkipAnalysisStatus.READY)
                 && !snapshot.occurrences.isEmpty());
         if (snapshot.status == SkipAnalysisStatus.ANALYZING) {
             skipAnalysisButton.setText(getString(R.string.audio_skip_playback_analyzing));
+        } else if (snapshot.status == SkipAnalysisStatus.WAITING_FOR_AUDIO) {
+            skipAnalysisButton.setText(getString(R.string.audio_skip_playback_waiting_for_audio));
+        } else if (snapshot.status == SkipAnalysisStatus.WINDOW_READY) {
+            skipAnalysisButton.setText(getString(R.string.audio_skip_playback_window_ready,
+                    snapshot.occurrences.size()));
+        } else if (snapshot.status == SkipAnalysisStatus.DOWNLOAD_REQUIRED) {
+            skipAnalysisButton.setText(getString(R.string.audio_skip_playback_download_required));
         } else if (snapshot.status == SkipAnalysisStatus.READY) {
             skipAnalysisButton.setText(getString(R.string.audio_skip_playback_ready,
                     snapshot.occurrences.size()));
@@ -457,22 +490,23 @@ public class AudioPlayerFragment extends Fragment implements
 
     private void addSkipRule() {
         if (addSkipRuleLaunching || currentMedia == null || currentMedia.getItem() == null
-                || currentMedia.getItem().getFeed() == null || !currentMedia.localFileAvailable()) {
+                || currentMedia.getItem().getFeed() == null) {
             return;
         }
         FeedMedia capturedMedia = currentMedia;
         FeedItem item = capturedMedia.getItem();
         long feedId = item.getFeed().getId();
         long episodeId = item.getId();
-        String episodeUri = capturedMedia.getLocalFileUrl();
         addSkipRuleLaunching = true;
         PlaybackController.bindToMedia3Service(getContext(), controller -> {
+            Uri sourceUri = getCurrentSkipSource(controller, capturedMedia);
             if (!isAdded() || currentMedia == null || currentMedia.getId() != capturedMedia.getId()
-                    || !isCurrentLocalPlayback(controller, capturedMedia)) {
+                    || sourceUri == null) {
                 addSkipRuleLaunching = false;
                 return;
             }
             long position = Math.max(0, controller.getCurrentPosition());
+            long duration = Math.max(controller.getDuration(), capturedMedia.getDuration());
             controller.pause();
             if (getActivity() != null) {
                 getActivity().runOnUiThread(() -> {
@@ -480,8 +514,9 @@ public class AudioPlayerFragment extends Fragment implements
                     intent.putExtra(AudioSkipRulesActivity.EXTRA_FEED_ID, feedId);
                     intent.putExtra(AudioSkipRulesActivity.EXTRA_PLAYER_ORIGIN, true);
                     intent.putExtra(AudioSkipRulesActivity.EXTRA_EPISODE_ID, episodeId);
-                    intent.putExtra(AudioSkipRulesActivity.EXTRA_EPISODE_URI, episodeUri);
+                    intent.putExtra(AudioSkipRulesActivity.EXTRA_EPISODE_URI, sourceUri.toString());
                     intent.putExtra(AudioSkipRulesActivity.EXTRA_POSITION, position);
+                    intent.putExtra(AudioSkipRulesActivity.EXTRA_DURATION, duration);
                     startActivity(intent);
                 });
             } else {
