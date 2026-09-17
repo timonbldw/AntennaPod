@@ -63,26 +63,12 @@ public final class SkipResolver {
         }
 
         SkipMarkerHit openStart = null;
-        boolean ambiguousPhaseKnown = false;
-        SkipMarkerHit uncertainStart = null;
         for (HitOccurrence hit : hitOccurrences(rule, hits, episodeDurationMs)) {
             if (openStart == null) {
                 if (hit.start != null) {
-                    if (hit.end == null || ambiguousPhaseKnown || uncertainStart == null
-                            && hasPrecedingCoverage(rule, hit.end, episodeDurationMs, coverage)
-                            || uncertainStart != null && cannotPair(rule, uncertainStart,
-                            hit.end, episodeDurationMs)) {
-                        openStart = hit.start;
-                        ambiguousPhaseKnown = true;
-                        uncertainStart = null;
-                    } else {
-                        detections.add(detection(rule, hit.start, SkipDetection.Reason.PENDING));
-                        detections.add(detection(rule, hit.end, SkipDetection.Reason.PENDING));
-                        uncertainStart = hit.start;
-                    }
+                    openStart = hit.start;
                 } else {
                     addMissingStart(detections, rule, hit.end, episodeDurationMs, coverage);
-                    ambiguousPhaseKnown = hasPrecedingCoverage(rule, hit.end, episodeDurationMs, coverage);
                 }
                 continue;
             }
@@ -100,11 +86,10 @@ public final class SkipResolver {
                     continue;
                 }
                 if (intervalMs < rule.minDurationMs) {
-                    SkipDetection.Reason reason = isCovered(coverage, openStart.timeMs, hit.end.timeMs)
-                            ? SkipDetection.Reason.TOO_SHORT : SkipDetection.Reason.PENDING;
-                    detections.add(detection(rule, hit.end, reason));
-                    if (hit.start != null) {
-                        detections.add(detection(rule, hit.start, reason));
+                    if (hit.start == null) {
+                        SkipDetection.Reason reason = isCovered(coverage, openStart.timeMs, hit.end.timeMs)
+                                ? SkipDetection.Reason.TOO_SHORT : SkipDetection.Reason.PENDING;
+                        detections.add(detection(rule, hit.end, reason));
                     }
                     continue;
                 } else if (rule.maxDurationMs > 0 && intervalMs > rule.maxDurationMs) {
@@ -131,12 +116,7 @@ public final class SkipResolver {
                 } else if (!isCovered(coverage, openStart.timeMs, hit.end.timeMs)) {
                     detections.add(detection(rule, openStart, SkipDetection.Reason.PENDING));
                     detections.add(detection(rule, hit.end, SkipDetection.Reason.PENDING));
-                    if (hit.start != null) {
-                        detections.add(detection(rule, hit.start, SkipDetection.Reason.PENDING));
-                    }
-                    openStart = null;
-                    ambiguousPhaseKnown = false;
-                    uncertainStart = hit.start;
+                    openStart = hit.start;
                     continue;
                 } else {
                     addOccurrence(occurrences, rule, openStart.timeMs, endMs,
@@ -158,22 +138,6 @@ public final class SkipResolver {
         detections.sort(Comparator.comparingLong((SkipDetection item) -> item.timeMs)
                 .thenComparing(item -> item.marker));
         return new Resolution(occurrences, detections);
-    }
-
-    private static boolean hasPrecedingCoverage(SkipRule rule, SkipMarkerHit hit,
-                                                long episodeDurationMs, List<SkipCoverage> coverage) {
-        long searchStart = regionStart(rule, hit.timeMs, episodeDurationMs);
-        if (rule.maxDurationMs > 0) {
-            searchStart = Math.max(searchStart, sampleEnd(rule, hit) - rule.maxDurationMs);
-        }
-        return isCovered(coverage, searchStart, hit.timeMs);
-    }
-
-    private static boolean cannotPair(SkipRule rule, SkipMarkerHit start, SkipMarkerHit end,
-                                      long episodeDurationMs) {
-        long endMs = sampleEnd(rule, end);
-        return endMs > relevantWindowEnd(rule, start.timeMs, episodeDurationMs)
-                || rule.maxDurationMs > 0 && endMs - start.timeMs > rule.maxDurationMs;
     }
 
     private static long regionStart(SkipRule rule, long timeMs, long episodeDurationMs) {
@@ -198,7 +162,10 @@ public final class SkipResolver {
         List<HitOccurrence> result = new ArrayList<>();
         long clusterStartMs = -1;
         for (SkipMarkerHit hit : matching) {
-            if (result.isEmpty() || hit.timeMs - clusterStartMs > SAME_OCCURRENCE_MS) {
+            HitOccurrence previous = result.isEmpty() ? null : result.get(result.size() - 1);
+            if (previous == null || hit.timeMs - clusterStartMs > SAME_OCCURRENCE_MS
+                    && !nearExistingRole(previous, hit)
+                    && !tooCloseSimilarOppositeMarker(rule, previous, hit)) {
                 result.add(new HitOccurrence());
                 clusterStartMs = hit.timeMs;
             }
@@ -214,6 +181,41 @@ public final class SkipResolver {
             }
         }
         return result;
+    }
+
+    private static boolean nearExistingRole(HitOccurrence occurrence, SkipMarkerHit hit) {
+        SkipMarkerHit existing = hit.marker == SkipMarker.START ? occurrence.start : occurrence.end;
+        return existing != null && hit.timeMs - existing.timeMs <= SAME_OCCURRENCE_MS;
+    }
+
+    private static boolean tooCloseSimilarOppositeMarker(SkipRule rule, HitOccurrence occurrence,
+                                                          SkipMarkerHit hit) {
+        if (rule.minDurationMs <= 0) {
+            return false;
+        }
+        if (hit.marker == SkipMarker.END && occurrence.start != null && occurrence.end == null) {
+            return sampleEnd(rule, hit) - occurrence.start.timeMs < rule.minDurationMs
+                    && samplesSimilar(rule, occurrence.start, hit);
+        }
+        return hit.marker == SkipMarker.START && occurrence.end != null && occurrence.start == null
+                && hit.timeMs - occurrence.end.timeMs < rule.minDurationMs
+                && samplesSimilar(rule, occurrence.end, hit);
+    }
+
+    private static boolean samplesSimilar(SkipRule rule, SkipMarkerHit first, SkipMarkerHit second) {
+        SkipSample firstSample = sample(rule, first.sampleId);
+        SkipSample secondSample = sample(rule, second.sampleId);
+        return firstSample != null && secondSample != null
+                && SkipFingerprint.similarity(firstSample.fingerprint, secondSample.fingerprint) >= 0.82f;
+    }
+
+    private static SkipSample sample(SkipRule rule, String sampleId) {
+        for (SkipSample sample : rule.samples) {
+            if (sample.id.equals(sampleId)) {
+                return sample;
+            }
+        }
+        return null;
     }
 
     private static SkipMarkerHit better(SkipMarkerHit existing, SkipMarkerHit candidate) {

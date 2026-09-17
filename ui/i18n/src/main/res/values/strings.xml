@@ -12,6 +12,14 @@
     <string name="audio_skip_playback_window_ready">Automatic skip sections available in buffered audio (%1$d)</string>
     <string name="audio_skip_playback_download_required">Download the episode to analyze the remaining audio</string>
     <string name="audio_skip_playback_no_audio">No playable audio source</string>
+    <string name="audio_skip_playback_analyzing_short">Analyzing skips</string>
+    <string name="audio_skip_playback_ready_short">Skips available (%1$d)</string>
+    <string name="audio_skip_playback_no_matches_short">No skips detected</string>
+    <string name="audio_skip_playback_waiting_for_audio_short">Waiting for audio</string>
+    <string name="audio_skip_playback_window_ready_short">Skips available in buffer (%1$d)</string>
+    <string name="audio_skip_playback_download_required_short">Download to analyze</string>
+    <string name="audio_skip_playback_error_short">Skip analysis unavailable</string>
+    <string name="audio_skip_playback_diagnostics_only_short">Diagnostics available (%1$d)</string>
     <string name="audio_skip_playback_sections_title">Automatic skip sections</string>
     <string name="audio_skip_playback_show_sections">Show detected sections</string>
     <string name="audio_skip_playback_rule">Automatic: %1$s</string>
