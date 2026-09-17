@@ -1,6 +1,7 @@
 package de.danoeh.antennapod.ui.screen.playback.audio;
 
 import android.os.Bundle;
+import android.content.Intent;
 import android.net.Uri;
 import android.util.Log;
 import android.view.KeyEvent;
@@ -64,6 +65,7 @@ import de.danoeh.antennapod.activity.MainActivity;
 import de.danoeh.antennapod.ui.common.Converter;
 import de.danoeh.antennapod.ui.screen.chapter.ChaptersFragment;
 import de.danoeh.antennapod.ui.screen.feed.preferences.SkipPreferenceDialog;
+import de.danoeh.antennapod.ui.screen.feed.preferences.audioskip.AudioSkipRulesActivity;
 import de.danoeh.antennapod.event.FeedItemEvent;
 import de.danoeh.antennapod.event.PlayerErrorEvent;
 import de.danoeh.antennapod.event.PlayerStatusEvent;
@@ -111,6 +113,8 @@ public class AudioPlayerFragment extends Fragment implements
     private CardView cardViewSeek;
     private TextView txtvSeek;
     private Button skipAnalysisButton;
+    private Button addSkipRuleButton;
+    private boolean addSkipRuleLaunching;
 
     private FeedMedia currentMedia;
     private Disposable disposable;
@@ -157,7 +161,9 @@ public class AudioPlayerFragment extends Fragment implements
         cardViewSeek = root.findViewById(R.id.cardViewSeek);
         txtvSeek = root.findViewById(R.id.txtvSeek);
         skipAnalysisButton = root.findViewById(R.id.skipAnalysisButton);
+        addSkipRuleButton = root.findViewById(R.id.addSkipRuleButton);
         skipAnalysisButton.setOnClickListener(v -> showSkipAnalysisDialog());
+        addSkipRuleButton.setOnClickListener(v -> addSkipRule());
         sbPosition.setContentDescription(getString(R.string.audio_skip_playback_show_sections));
 
         setupLengthTextView();
@@ -346,6 +352,8 @@ public class AudioPlayerFragment extends Fragment implements
         unsubscribeFromSkipAnalysis();
         sbPosition.setSkipAnalysis(null);
         skipAnalysisButton.setVisibility(View.GONE);
+        addSkipRuleButton.setVisibility(View.GONE);
+        addSkipRuleButton.setEnabled(false);
         if (currentMedia == null || currentMedia.getItem() == null
                 || currentMedia.getItem().getFeed() == null) {
             return;
@@ -367,12 +375,16 @@ public class AudioPlayerFragment extends Fragment implements
                         return;
                     }
                     if (!localPlayback) {
-                        skipAnalysisButton.setVisibility(View.VISIBLE);
-                        skipAnalysisButton.setEnabled(false);
-                        skipAnalysisButton.setText(R.string.audio_skip_playback_no_audio);
-                        skipAnalysisButton.setContentDescription(skipAnalysisButton.getText());
+                        addSkipRuleButton.setVisibility(View.VISIBLE);
+                        addSkipRuleButton.setEnabled(false);
+                        addSkipRuleButton.setText(R.string.audio_skip_download_required);
+                        addSkipRuleButton.setContentDescription(addSkipRuleButton.getText());
                         return;
                     }
+                    addSkipRuleButton.setVisibility(View.VISIBLE);
+                    addSkipRuleButton.setEnabled(true);
+                    addSkipRuleButton.setText(R.string.audio_skip_add_rule_short);
+                    addSkipRuleButton.setContentDescription(addSkipRuleButton.getText());
                     observeSkipSnapshot(generation, observedMedia);
                 });
             }
@@ -423,7 +435,8 @@ public class AudioPlayerFragment extends Fragment implements
             return;
         }
         skipAnalysisButton.setVisibility(View.VISIBLE);
-        skipAnalysisButton.setEnabled(snapshot.status == SkipAnalysisStatus.READY
+        skipAnalysisButton.setEnabled((snapshot.status == SkipAnalysisStatus.ANALYZING
+                || snapshot.status == SkipAnalysisStatus.READY)
                 && !snapshot.occurrences.isEmpty());
         if (snapshot.status == SkipAnalysisStatus.ANALYZING) {
             skipAnalysisButton.setText(getString(R.string.audio_skip_playback_analyzing));
@@ -440,6 +453,41 @@ public class AudioPlayerFragment extends Fragment implements
 
     private void showSkipAnalysisDialog() {
         new ChaptersFragment().show(getChildFragmentManager(), ChaptersFragment.TAG);
+    }
+
+    private void addSkipRule() {
+        if (addSkipRuleLaunching || currentMedia == null || currentMedia.getItem() == null
+                || currentMedia.getItem().getFeed() == null || !currentMedia.localFileAvailable()) {
+            return;
+        }
+        FeedMedia capturedMedia = currentMedia;
+        FeedItem item = capturedMedia.getItem();
+        long feedId = item.getFeed().getId();
+        long episodeId = item.getId();
+        String episodeUri = capturedMedia.getLocalFileUrl();
+        addSkipRuleLaunching = true;
+        PlaybackController.bindToMedia3Service(getContext(), controller -> {
+            if (!isAdded() || currentMedia == null || currentMedia.getId() != capturedMedia.getId()
+                    || !isCurrentLocalPlayback(controller, capturedMedia)) {
+                addSkipRuleLaunching = false;
+                return;
+            }
+            long position = Math.max(0, controller.getCurrentPosition());
+            controller.pause();
+            if (getActivity() != null) {
+                getActivity().runOnUiThread(() -> {
+                    Intent intent = new Intent(getContext(), AudioSkipRulesActivity.class);
+                    intent.putExtra(AudioSkipRulesActivity.EXTRA_FEED_ID, feedId);
+                    intent.putExtra(AudioSkipRulesActivity.EXTRA_PLAYER_ORIGIN, true);
+                    intent.putExtra(AudioSkipRulesActivity.EXTRA_EPISODE_ID, episodeId);
+                    intent.putExtra(AudioSkipRulesActivity.EXTRA_EPISODE_URI, episodeUri);
+                    intent.putExtra(AudioSkipRulesActivity.EXTRA_POSITION, position);
+                    startActivity(intent);
+                });
+            } else {
+                addSkipRuleLaunching = false;
+            }
+        });
     }
 
     @Subscribe(threadMode = ThreadMode.MAIN)
@@ -486,6 +534,10 @@ public class AudioPlayerFragment extends Fragment implements
     public void onStop() {
         super.onStop();
         skipSourceGeneration++;
+        if (addSkipRuleButton != null) {
+            addSkipRuleButton.setVisibility(View.GONE);
+        }
+        addSkipRuleLaunching = false;
         progressIndicator.setVisibility(View.GONE);
         EventBus.getDefault().unregister(this);
         if (disposable != null) {

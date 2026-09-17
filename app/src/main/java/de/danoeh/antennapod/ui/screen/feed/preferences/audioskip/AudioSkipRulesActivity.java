@@ -1,10 +1,17 @@
 package de.danoeh.antennapod.ui.screen.feed.preferences.audioskip;
 
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.os.SystemClock;
+import android.media.MediaPlayer;
+import android.net.Uri;
 import android.view.Gravity;
 import android.view.View;
+import android.view.ViewGroup;
 import android.widget.ArrayAdapter;
 import android.widget.AdapterView;
+import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -27,8 +34,11 @@ import java.util.Locale;
 import java.util.UUID;
 
 import de.danoeh.antennapod.R;
+import de.danoeh.antennapod.playback.service.PlaybackController;
 import de.danoeh.antennapod.playback.service.skip.AudioFingerprint;
 import de.danoeh.antennapod.playback.service.skip.SkipManager;
+import de.danoeh.antennapod.playback.service.skip.SkipAnalysisSnapshot;
+import de.danoeh.antennapod.playback.service.skip.SkipCoverage;
 import de.danoeh.antennapod.playback.service.skip.SkipMarker;
 import de.danoeh.antennapod.playback.service.skip.SkipRule;
 import de.danoeh.antennapod.playback.service.skip.SkipSample;
@@ -42,6 +52,10 @@ import io.reactivex.rxjava3.schedulers.Schedulers;
 
 public class AudioSkipRulesActivity extends ToolbarActivity {
     public static final String EXTRA_FEED_ID = "feedId";
+    public static final String EXTRA_PLAYER_ORIGIN = "playerOrigin";
+    public static final String EXTRA_EPISODE_ID = "episodeId";
+    public static final String EXTRA_EPISODE_URI = "episodeUri";
+    public static final String EXTRA_POSITION = "position";
 
     private static final String STATE_SCREEN = "screen";
     private static final String STATE_RULE_ID = "ruleId";
@@ -75,6 +89,12 @@ public class AudioSkipRulesActivity extends ToolbarActivity {
     private View fixedLayout;
     private View missingLayout;
     private View missingDurationLayout;
+    private View durationSettingsView;
+    private View searchSettingsView;
+    private Button durationSettingsButton;
+    private Button searchSettingsButton;
+    private Button addStartSample;
+    private Button addEndSample;
     private EditText missingDurationInput;
     private EditText fixedInput;
     private EditText firstInput;
@@ -82,14 +102,22 @@ public class AudioSkipRulesActivity extends ToolbarActivity {
     private LinearLayout sampleContainer;
     private TextView validation;
     private SkipTask testTask;
+    private MediaPlayer testPlayer;
+    private final Handler testHandler = new Handler(Looper.getMainLooper());
+    private boolean testPlaybackStarted;
+    private boolean testPlayerPrepared;
+    private long pendingTestEnd = -1;
+    private long testPreviewStartedAt;
     private Spinner testEpisodeInput;
     private List<SampleEditorView.EpisodeInfo> testEpisodes = Collections.emptyList();
     private boolean sampleVisible;
+    private boolean playerOrigin;
 
     @Override
     protected void onCreate(@Nullable Bundle state) {
         super.onCreate(state);
         feedId = getIntent().getLongExtra(EXTRA_FEED_ID, -1);
+        playerOrigin = getIntent().getBooleanExtra(EXTRA_PLAYER_ORIGIN, false);
         skipManager = SkipManager.getInstance(this);
         getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
             @Override
@@ -97,10 +125,18 @@ public class AudioSkipRulesActivity extends ToolbarActivity {
                 if (!editorVisible) {
                     finish();
                 } else if (sampleVisible) {
-                    sampleVisible = false;
-                    showEditor();
+                    if (playerOrigin) {
+                        finish();
+                    } else {
+                        sampleVisible = false;
+                        showEditor();
+                    }
                 } else {
-                    showRules();
+                    if (playerOrigin) {
+                        finish();
+                    } else {
+                        showRules();
+                    }
                 }
             }
         });
@@ -111,6 +147,13 @@ public class AudioSkipRulesActivity extends ToolbarActivity {
         if (state != null && "editor".equals(state.getString(STATE_SCREEN))) {
             draft = ruleFromState(state);
             showEditor();
+        } else if (playerOrigin) {
+            draft = new SkipRule(UUID.randomUUID().toString(), "", true,
+                    SkipRule.Type.BETWEEN, 10_000, 120_000,
+                    SkipRule.MissingEndBehavior.UNTOUCHED, 0, 0, 0, 0,
+                    Collections.emptyList());
+            showEditor();
+            openSampleEditor(SkipMarker.START, -1);
         } else {
             showRules();
         }
@@ -148,6 +191,7 @@ public class AudioSkipRulesActivity extends ToolbarActivity {
             value.putString("marker", sample.marker.name());
             value.putLong("duration", sample.durationMs);
             value.putLong("offset", sample.markerOffsetMs);
+            value.putLong("sourcePosition", sample.sourcePositionMs);
             value.putInt("rate", sample.fingerprint.sampleRate);
             value.putInt("frame", sample.fingerprint.frameMs);
             value.putInt("hop", sample.fingerprint.hopMs);
@@ -163,6 +207,8 @@ public class AudioSkipRulesActivity extends ToolbarActivity {
         if (testTask != null) {
             testTask.cancel();
         }
+        stopTestPlayback();
+        testHandler.removeCallbacksAndMessages(null);
         super.onDestroy();
     }
 
@@ -170,8 +216,14 @@ public class AudioSkipRulesActivity extends ToolbarActivity {
     public boolean onSupportNavigateUp() {
         if (editorVisible) {
             if (sampleVisible) {
-                sampleVisible = false;
-                showEditor();
+                if (playerOrigin) {
+                    finish();
+                } else {
+                    sampleVisible = false;
+                    showEditor();
+                }
+            } else if (playerOrigin) {
+                finish();
             } else {
                 showRules();
             }
@@ -189,6 +241,8 @@ public class AudioSkipRulesActivity extends ToolbarActivity {
             testTask.cancel();
             testTask = null;
         }
+        stopTestPlayback();
+        testHandler.removeCallbacksAndMessages(null);
         setTitle(R.string.audio_skip_rules_title);
         if (getSupportActionBar() != null) {
             getSupportActionBar().setDisplayHomeAsUpEnabled(true);
@@ -196,8 +250,8 @@ public class AudioSkipRulesActivity extends ToolbarActivity {
         View root = getLayoutInflater().inflate(R.layout.audio_skip_rules, null);
         View add = root.findViewById(R.id.audioSkipAddRule);
         add.setOnClickListener(view -> {
-            draft = new SkipRule(UUID.randomUUID().toString(), getString(R.string.audio_skip_new_rule), true,
-                    SkipRule.Type.BETWEEN, 0, 120_000,
+            draft = new SkipRule(UUID.randomUUID().toString(), "", true,
+                    SkipRule.Type.BETWEEN, 10_000, 120_000,
                     SkipRule.MissingEndBehavior.UNTOUCHED, 0, 0, 0, 0,
                     Collections.emptyList());
             showEditor();
@@ -272,39 +326,53 @@ public class AudioSkipRulesActivity extends ToolbarActivity {
                         getString(R.string.audio_skip_type_fixed), getString(R.string.audio_skip_type_finish)}));
         typeInput.setSelection(draft.type.ordinal());
         typeInput.setOnItemSelectedListener(new SimpleItemSelectedListener(this::updateTypeVisibility));
-        durationsSection = root.findViewById(R.id.audioSkipDurationsSection);
-        minLayout = root.findViewById(R.id.audioSkipMinDurationLayout);
-        maxLayout = root.findViewById(R.id.audioSkipMaxDurationLayout);
-        fixedLayout = root.findViewById(R.id.audioSkipFixedDurationLayout);
-        missingLayout = root.findViewById(R.id.audioSkipMissingEndLayout);
-        missingDurationLayout = root.findViewById(R.id.audioSkipMissingDurationLayout);
-        minInput = root.findViewById(R.id.audioSkipMinDurationInput);
-        maxInput = root.findViewById(R.id.audioSkipMaxDurationInput);
-        fixedInput = root.findViewById(R.id.audioSkipFixedDurationInput);
+        durationSettingsView = getLayoutInflater().inflate(R.layout.audio_skip_duration_settings, null);
+        searchSettingsView = getLayoutInflater().inflate(R.layout.audio_skip_search_settings, null);
+        durationsSection = durationSettingsView.findViewById(R.id.audioSkipDurationsSection);
+        minLayout = durationSettingsView.findViewById(R.id.audioSkipMinDurationLayout);
+        maxLayout = durationSettingsView.findViewById(R.id.audioSkipMaxDurationLayout);
+        fixedLayout = durationSettingsView.findViewById(R.id.audioSkipFixedDurationLayout);
+        missingLayout = durationSettingsView.findViewById(R.id.audioSkipMissingEndLayout);
+        missingDurationLayout = durationSettingsView.findViewById(R.id.audioSkipMissingDurationLayout);
+        minInput = durationSettingsView.findViewById(R.id.audioSkipMinDurationInput);
+        maxInput = durationSettingsView.findViewById(R.id.audioSkipMaxDurationInput);
+        fixedInput = durationSettingsView.findViewById(R.id.audioSkipFixedDurationInput);
         minInput.setText(formatTime(draft.minDurationMs));
         maxInput.setText(formatTime(draft.maxDurationMs));
         fixedInput.setText(formatTime(draft.fixedDurationMs));
-        missingInput = root.findViewById(R.id.audioSkipMissingEndInput);
+        missingInput = durationSettingsView.findViewById(R.id.audioSkipMissingEndInput);
         missingInput.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item,
                 new String[]{getString(R.string.audio_skip_missing_untouched),
                         getString(R.string.audio_skip_missing_fixed)}));
         missingInput.setSelection(draft.missingEndBehavior == SkipRule.MissingEndBehavior.FIXED ? 1 : 0);
-        missingDurationInput = root.findViewById(R.id.audioSkipMissingDurationInput);
-        firstInput = root.findViewById(R.id.audioSkipFirstRegionInput);
-        lastInput = root.findViewById(R.id.audioSkipLastRegionInput);
+        missingDurationInput = durationSettingsView.findViewById(R.id.audioSkipMissingDurationInput);
+        firstInput = searchSettingsView.findViewById(R.id.audioSkipFirstRegionInput);
+        lastInput = searchSettingsView.findViewById(R.id.audioSkipLastRegionInput);
         missingDurationInput.setText(formatTime(draft.missingEndDurationMs));
-        firstInput.setText(formatTime(draft.firstRegionMs));
-        lastInput.setText(formatTime(draft.lastRegionMs));
+        firstInput.setText(formatRegion(draft.firstRegionMs));
+        lastInput.setText(formatRegion(draft.lastRegionMs));
         testEpisodeInput = root.findViewById(R.id.audioSkipTestEpisodeInput);
         loadTestEpisodes();
         sampleContainer = root.findViewById(R.id.audioSkipSampleContainer);
-        root.findViewById(R.id.audioSkipAddStartSample).setOnClickListener(
+        addStartSample = root.findViewById(R.id.audioSkipAddStartSample);
+        addEndSample = root.findViewById(R.id.audioSkipAddEndSample);
+        addStartSample.setOnClickListener(
                 view -> openSampleEditor(SkipMarker.START, -1));
-        root.findViewById(R.id.audioSkipAddEndSample).setOnClickListener(
+        addEndSample.setOnClickListener(
                 view -> openSampleEditor(SkipMarker.END, -1));
+        durationSettingsButton = root.findViewById(R.id.audioSkipDurationSettingsButton);
+        searchSettingsButton = root.findViewById(R.id.audioSkipSearchSettingsButton);
+        durationSettingsButton.setOnClickListener(view -> showDurationSettingsDialog());
+        searchSettingsButton.setOnClickListener(view -> showSearchSettingsDialog());
         validation = root.findViewById(R.id.audioSkipValidation);
         root.findViewById(R.id.audioSkipTestRule).setOnClickListener(view -> testRule());
-        root.findViewById(R.id.audioSkipCancelRule).setOnClickListener(view -> showRules());
+        root.findViewById(R.id.audioSkipCancelRule).setOnClickListener(view -> {
+            if (playerOrigin) {
+                finish();
+            } else {
+                showRules();
+            }
+        });
         root.findViewById(R.id.audioSkipSaveRule).setOnClickListener(view -> saveEditor());
         setContentView(root);
         updateTypeVisibility(typeInput.getSelectedItemPosition());
@@ -316,15 +384,50 @@ public class AudioSkipRulesActivity extends ToolbarActivity {
             return;
         }
         boolean between = position == SkipRule.Type.BETWEEN.ordinal();
-        durationsSection.setVisibility(position == SkipRule.Type.FINISH.ordinal() ? View.GONE : View.VISIBLE);
+        boolean finish = position == SkipRule.Type.FINISH.ordinal();
+        durationsSection.setVisibility(finish ? View.GONE : View.VISIBLE);
         minLayout.setVisibility(between ? View.VISIBLE : View.GONE);
         maxLayout.setVisibility(between ? View.VISIBLE : View.GONE);
         fixedLayout.setVisibility(position == SkipRule.Type.FIXED.ordinal() ? View.VISIBLE : View.GONE);
         missingLayout.setVisibility(between ? View.VISIBLE : View.GONE);
         missingDurationLayout.setVisibility(between && missingInput.getSelectedItemPosition() == 1
                 ? View.VISIBLE : View.GONE);
+        addStartSample.setText(finish ? R.string.audio_skip_add_episode_end_marker
+                : R.string.audio_skip_add_start_sample);
+        addEndSample.setVisibility(between ? View.VISIBLE : View.GONE);
+        durationSettingsButton.setVisibility(finish ? View.GONE : View.VISIBLE);
+        searchSettingsButton.setVisibility(finish ? View.GONE : View.VISIBLE);
+        LinearLayout.LayoutParams startParams = (LinearLayout.LayoutParams) addStartSample.getLayoutParams();
+        startParams.width = finish ? -1 : 0;
+        startParams.weight = finish ? 0 : 1;
+        startParams.setMargins(0, 0, finish ? 0 : dp(4), 0);
+        addStartSample.setLayoutParams(startParams);
         missingInput.setOnItemSelectedListener(new SimpleItemSelectedListener(value ->
                 missingDurationLayout.setVisibility(between && value == 1 ? View.VISIBLE : View.GONE)));
+    }
+
+    private void showDurationSettingsDialog() {
+        if (durationSettingsView.getParent() instanceof ViewGroup) {
+            ((ViewGroup) durationSettingsView.getParent()).removeView(durationSettingsView);
+        }
+        new MaterialAlertDialogBuilder(this)
+                .setTitle(R.string.audio_skip_duration_settings)
+                .setView(durationSettingsView)
+                .setNegativeButton(android.R.string.cancel, null)
+                .setPositiveButton(android.R.string.ok, null)
+                .show();
+    }
+
+    private void showSearchSettingsDialog() {
+        if (searchSettingsView.getParent() instanceof ViewGroup) {
+            ((ViewGroup) searchSettingsView.getParent()).removeView(searchSettingsView);
+        }
+        new MaterialAlertDialogBuilder(this)
+                .setTitle(R.string.audio_skip_search_settings)
+                .setView(searchSettingsView)
+                .setNegativeButton(android.R.string.cancel, null)
+                .setPositiveButton(android.R.string.ok, null)
+                .show();
     }
 
     private void updateSamples() {
@@ -336,7 +439,9 @@ public class AudioSkipRulesActivity extends ToolbarActivity {
             SkipSample sample = draft.samples.get(index);
             View row = getLayoutInflater().inflate(R.layout.audio_skip_sample_row, sampleContainer, false);
             TextView marker = row.findViewById(R.id.audioSkipSampleMarker);
-            marker.setText(sample.marker == SkipMarker.START ? R.string.audio_skip_sample_start
+            marker.setText(draft.type == SkipRule.Type.FINISH && sample.marker == SkipMarker.START
+                    ? R.string.audio_skip_sample_episode_end
+                    : sample.marker == SkipMarker.START ? R.string.audio_skip_sample_start
                     : R.string.audio_skip_sample_end);
             TextView duration = row.findViewById(R.id.audioSkipSampleDuration);
             duration.setText(formatTime(sample.durationMs));
@@ -358,7 +463,7 @@ public class AudioSkipRulesActivity extends ToolbarActivity {
         if (value == null) {
             return;
         }
-        saveRule(value, this::showRules);
+        saveRule(value, playerOrigin ? this::finish : this::showRules);
     }
 
     private SkipRule readDraft(boolean showValidation) {
@@ -367,7 +472,7 @@ public class AudioSkipRulesActivity extends ToolbarActivity {
 
     private SkipRule readDraft(boolean showValidation, boolean requireSamples) {
         String name = nameInput.getText().toString().trim();
-        if (name.isEmpty()) {
+        if (name.isEmpty() && (requireSamples || !playerOrigin)) {
             return invalid(R.string.audio_skip_validation_name, showValidation);
         }
         SkipRule.Type type = SkipRule.Type.values()[typeInput.getSelectedItemPosition()];
@@ -420,7 +525,7 @@ public class AudioSkipRulesActivity extends ToolbarActivity {
                 ? Math.max(min, nonnegative(parseDuration(maxInput.getText().toString()))) : 0;
         boolean fixedFallback = type == SkipRule.Type.BETWEEN
                 && missingInput.getSelectedItemPosition() == 1;
-        return new SkipRule(draft.id, name.isEmpty() ? getString(R.string.audio_skip_new_rule) : name,
+        return new SkipRule(draft.id, name,
                 enabledInput.isChecked(), type, min, max,
                 fixedFallback ? SkipRule.MissingEndBehavior.FIXED : SkipRule.MissingEndBehavior.UNTOUCHED,
                 fixedFallback ? nonnegative(parseDuration(missingDurationInput.getText().toString())) : 0,
@@ -464,7 +569,19 @@ public class AudioSkipRulesActivity extends ToolbarActivity {
         }
         draft = currentDraft;
         getIntent().putExtra(SampleEditorView.EXTRA_MARKER, marker.name());
+        long preferredPosition = playerOrigin ? getIntent().getLongExtra(EXTRA_POSITION, -1) : -1;
+        if (playerOrigin && marker == SkipMarker.END) {
+            for (SkipSample sample : draft.samples) {
+                if (sample.marker == SkipMarker.START && sample.sourcePositionMs >= 0) {
+                    preferredPosition = sample.sourcePositionMs;
+                    break;
+                }
+            }
+        }
         SampleEditorView view = new SampleEditorView(this, feedId, draft, marker, index,
+                playerOrigin ? getIntent().getLongExtra(EXTRA_EPISODE_ID, -1) : -1,
+                playerOrigin ? getIntent().getStringExtra(EXTRA_EPISODE_URI) : null,
+                preferredPosition,
                 result -> {
                     List<SkipSample> samples = new ArrayList<>(this.draft.samples);
                     if (result.replaceIndex >= 0 && result.replaceIndex < samples.size()) {
@@ -474,7 +591,13 @@ public class AudioSkipRulesActivity extends ToolbarActivity {
                     }
                     this.draft = this.draft.withSamples(samples);
                     showEditor();
-                }, this::showEditor);
+                }, () -> {
+                    if (playerOrigin) {
+                        finish();
+                    } else {
+                        showEditor();
+                    }
+                });
         sampleVisible = true;
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
@@ -494,44 +617,173 @@ public class AudioSkipRulesActivity extends ToolbarActivity {
             return;
         }
         SampleEditorView.EpisodeInfo episode = testEpisodes.get(testEpisodeInput.getSelectedItemPosition());
-        setValidation(R.string.audio_skip_test_analyzing, false);
         if (testTask != null) {
             testTask.cancel();
         }
+        stopTestPlayback();
+        testPlaybackStarted = false;
+        long startHint = startSamplePosition(value);
+        if (startHint >= 0 && value.type == SkipRule.Type.BETWEEN) {
+            setValidation(getString(R.string.audio_skip_test_analyzing_from,
+                    formatTime(Math.max(0, startHint - 5_000))), false);
+            startTestPreview(episode.uri, startHint);
+        } else {
+            setValidation(getString(R.string.audio_skip_test_analyzing_progress,
+                    formatTime(0)), false);
+        }
         try {
-            testTask = skipManager.testRule(value, episode.uri, episode.durationMs,
-                    snapshot -> runOnUiThread(() -> {
-                    if (isFinishing() || isDestroyed() || !editorVisible || sampleVisible
-                            || validation == null) {
-                        return;
-                    }
-                    switch (snapshot.status) {
-                        case READY:
-                            StringBuilder ranges = new StringBuilder();
-                            for (int i = 0; i < snapshot.occurrences.size(); i++) {
-                                if (i > 0) {
-                                    ranges.append(", ");
-                                }
-                                ranges.append(formatTime(snapshot.occurrences.get(i).startMs))
-                                        .append("-").append(formatTime(snapshot.occurrences.get(i).endMs));
-                            }
-                            setValidation(getString(R.string.audio_skip_test_ready,
-                                    snapshot.occurrences.size(), ranges), false);
-                            break;
-                        case NO_MATCHES:
-                            setValidation(R.string.audio_skip_test_no_matches, false);
-                            break;
-                        case ERROR:
-                            setValidation(getString(R.string.audio_skip_test_error, snapshot.error), true);
-                            break;
-                        default:
-                            setValidation(R.string.audio_skip_test_analyzing, false);
-                            break;
-                    }
-                    }));
+            testTask = startHint >= 0 && value.type == SkipRule.Type.BETWEEN
+                    ? skipManager.testRule(value, episode.uri, episode.durationMs, startHint,
+                    snapshot -> onTestSnapshot(snapshot, episode, startHint))
+                    : skipManager.testRule(value, episode.uri, episode.durationMs,
+                    snapshot -> onTestSnapshot(snapshot, episode, -1));
         } catch (IllegalArgumentException error) {
             testTask = null;
             setValidation(R.string.audio_skip_validation_rule, true);
+        }
+    }
+
+    private void onTestSnapshot(SkipAnalysisSnapshot snapshot, SampleEditorView.EpisodeInfo episode,
+                                long startHint) {
+        runOnUiThread(() -> {
+            if (isFinishing() || isDestroyed() || !editorVisible || sampleVisible
+                    || validation == null) {
+                return;
+            }
+            if (!snapshot.occurrences.isEmpty() && !testPlaybackStarted) {
+                testPlaybackStarted = true;
+                long previewStart = startHint >= 0 ? startHint : snapshot.occurrences.get(0).startMs;
+                playTestPreview(episode.uri, episode.durationMs, previewStart,
+                        snapshot.occurrences.get(0).endMs);
+            }
+            switch (snapshot.status) {
+                case READY:
+                    showTestResult(snapshot);
+                    break;
+                case NO_MATCHES:
+                    stopTestPlayback();
+                    setValidation(R.string.audio_skip_test_no_matches, false);
+                    break;
+                case ERROR:
+                    setValidation(getString(R.string.audio_skip_test_error, snapshot.error), true);
+                    break;
+                default:
+                    setTestProgress(snapshot, startHint);
+                    break;
+            }
+        });
+    }
+
+    private void setTestProgress(SkipAnalysisSnapshot snapshot, long startHint) {
+        long analyzedThrough = startHint >= 0 ? startHint - 5_000 : 0;
+        for (SkipCoverage coverage : snapshot.coverage) {
+            analyzedThrough = Math.max(analyzedThrough, coverage.endMs);
+        }
+        setValidation(getString(R.string.audio_skip_test_analyzing_progress,
+                formatTime(analyzedThrough)), false);
+    }
+
+    private void showTestResult(SkipAnalysisSnapshot snapshot) {
+        StringBuilder ranges = new StringBuilder();
+        for (int i = 0; i < snapshot.occurrences.size(); i++) {
+            if (i > 0) {
+                ranges.append(", ");
+            }
+            ranges.append(formatTime(snapshot.occurrences.get(i).startMs))
+                    .append("-").append(formatTime(snapshot.occurrences.get(i).endMs));
+        }
+        setValidation(getString(R.string.audio_skip_test_ready,
+                snapshot.occurrences.size(), ranges), false);
+    }
+
+    private long startSamplePosition(SkipRule rule) {
+        for (SkipSample sample : rule.samples) {
+            if (sample.marker == SkipMarker.START && sample.sourcePositionMs >= 0) {
+                return sample.sourcePositionMs;
+            }
+        }
+        return -1;
+    }
+
+    private void playTestPreview(Uri uri, long durationMs, long startHint, long detectedEnd) {
+        if (testPlayer == null) {
+            startTestPreview(uri, startHint);
+        }
+        if (testPlayer == null) {
+            return;
+        }
+        pendingTestEnd = Math.min(durationMs, detectedEnd);
+        if (testPlayerPrepared) {
+            seekTestPreviewToEnd();
+        }
+    }
+
+    private void startTestPreview(Uri uri, long startHint) {
+        stopTestPlayback();
+        try {
+            PlaybackController.bindToMedia3Service(this, controller -> controller.pause());
+            testPlayer = new MediaPlayer();
+            testPlayer.setDataSource(this, uri);
+            long start = Math.max(0, startHint - 5_000);
+            testPlayer.setOnPreparedListener(player -> {
+                if (isFinishing() || isDestroyed()) {
+                    stopTestPlayback();
+                    return;
+                }
+                testPlayerPrepared = true;
+                testPreviewStartedAt = SystemClock.uptimeMillis();
+                player.seekTo((int) start);
+                player.start();
+                if (pendingTestEnd >= 0) {
+                    seekTestPreviewToEnd();
+                }
+            });
+            testPlayer.setOnCompletionListener(player -> stopTestPlayback());
+            testPlayer.setOnErrorListener((player, what, extra) -> {
+                stopTestPlayback();
+                return true;
+            });
+            testPlayer.prepareAsync();
+        } catch (Exception error) {
+            stopTestPlayback();
+            Toast.makeText(this, R.string.audio_skip_preview_unavailable, Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private void seekTestPreviewToEnd() {
+        if (testPlayer == null || !testPlayerPrepared || pendingTestEnd < 0) {
+            return;
+        }
+        long remainingPreRoll = 5_000 - (SystemClock.uptimeMillis() - testPreviewStartedAt);
+        if (remainingPreRoll > 0) {
+            testHandler.postDelayed(this::seekTestPreviewToEnd, remainingPreRoll);
+            return;
+        }
+        testPlayer.seekTo((int) pendingTestEnd);
+        testPlayer.start();
+        testHandler.postDelayed(() -> stopTestPlayback(), 5_000);
+        pendingTestEnd = -1;
+    }
+
+    private void stopTestPlayback() {
+        testHandler.removeCallbacksAndMessages(null);
+        testPlayerPrepared = false;
+        pendingTestEnd = -1;
+        testPreviewStartedAt = 0;
+        if (testPlayer != null) {
+            try {
+                testPlayer.stop();
+            } catch (IllegalStateException ignored) {
+            }
+            try {
+                testPlayer.reset();
+            } catch (IllegalStateException ignored) {
+            }
+            try {
+                testPlayer.release();
+            } catch (IllegalStateException ignored) {
+            }
+            testPlayer = null;
         }
     }
 
@@ -568,7 +820,8 @@ public class AudioSkipRulesActivity extends ToolbarActivity {
             for (Bundle value : values) {
                 samples.add(new SkipSample(value.getString("id"),
                         SkipMarker.valueOf(value.getString("marker")), value.getLong("duration"),
-                        value.getLong("offset"), new AudioFingerprint(
+                        value.getLong("offset"), value.getLong("sourcePosition", -1),
+                        new AudioFingerprint(
                         value.getInt("rate"), value.getInt("frame"), value.getInt("hop"),
                         value.getIntArray("hashes"))));
             }
@@ -646,6 +899,10 @@ public class AudioSkipRulesActivity extends ToolbarActivity {
         return hours > 0 ? String.format(Locale.US, "%d:%02d:%02d.%03d", hours, minutes,
                 seconds, millis) : String.format(Locale.US, "%02d:%02d.%03d", minutes,
                 seconds, millis);
+    }
+
+    private static String formatRegion(long milliseconds) {
+        return milliseconds == 0 ? "" : formatTime(milliseconds);
     }
 
     private static final class SimpleItemSelectedListener implements AdapterView.OnItemSelectedListener {

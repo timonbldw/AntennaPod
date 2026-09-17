@@ -10,6 +10,24 @@ import static org.junit.Assert.fail;
 
 public class SkipRuleTest {
     @Test
+    public void unnamedDraftCannotPassValidation() {
+        int[] hashes = new int[61];
+        Arrays.fill(hashes, 0x456789ab);
+        SkipSample sample = new SkipSample("sample", SkipMarker.START, 2_000, 0,
+                new AudioFingerprint(8_000, 64, 32, hashes));
+        for (String name : Arrays.asList("", " \t\n")) {
+            SkipRule rule = new SkipRule("id", name, true, SkipRule.Type.FIXED, 0, 0,
+                    SkipRule.MissingEndBehavior.UNTOUCHED, 0, 5_000, 0, 0, Collections.singletonList(sample));
+            try {
+                rule.validate();
+                fail("Unnamed draft passed validation");
+            } catch (IllegalArgumentException error) {
+                assertTrue(error.getMessage().contains("name is required"));
+            }
+        }
+    }
+
+    @Test
     public void draftCannotBeSavedWithoutStartSample() {
         SkipRule rule = new SkipRule("id", "Intro", true, SkipRule.Type.FIXED, 0, 0,
                 SkipRule.MissingEndBehavior.UNTOUCHED, 0, 5_000, 0, 0, Collections.emptyList());
