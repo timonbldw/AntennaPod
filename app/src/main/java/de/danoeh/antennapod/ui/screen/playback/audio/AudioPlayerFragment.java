@@ -328,9 +328,10 @@ public class AudioPlayerFragment extends Fragment implements
            .subscribe(media -> {
             currentMedia = media;
             updateUi();
-            subscribeToSkipAnalysis();
             if (media.getChapters() == null && !includingChapters) {
                 loadMediaInfo(true);
+            } else {
+                subscribeToSkipAnalysis();
             }
         }, error -> Log.e(TAG, Log.getStackTraceString(error)));
     }
@@ -343,6 +344,10 @@ public class AudioPlayerFragment extends Fragment implements
         updatePlaybackSpeedButton(new SpeedChangedEvent(PlaybackSpeedUtils.getCurrentPlaybackSpeed(currentMedia)));
         setChapterDividers();
         setupOptionsMenu();
+        updatePlaybackButton();
+    }
+
+    private void updatePlaybackButton() {
         boolean isPlaying = PlaybackService.isRunning
                 && PlaybackPreferences.getCurrentPlayerStatus() == PlaybackPreferences.PLAYER_STATUS_PLAYING;
         butPlay.setIsShowPlay(!isPlaying);
@@ -389,6 +394,33 @@ public class AudioPlayerFragment extends Fragment implements
                     observeSkipSnapshot(generation, observedMedia, sourceUri);
                 });
             }
+        });
+    }
+
+    private void refreshSkipAnalysisSource() {
+        if (currentMedia == null || skipSubscription != null || skipFeedId == null || skipEpisodeId == null
+                || getActivity() == null) {
+            return;
+        }
+        final FeedMedia observedMedia = currentMedia;
+        PlaybackController.bindToMedia3Service(getActivity(), controller -> {
+            Uri sourceUri = getCurrentSkipSource(controller, observedMedia);
+            if (sourceUri == null || getActivity() == null) {
+                return;
+            }
+            getActivity().runOnUiThread(() -> {
+                if (!isAdded() || getView() == null || currentMedia == null
+                        || currentMedia.getId() != observedMedia.getId() || skipSubscription != null
+                        || sbPosition == null) {
+                    return;
+                }
+                int generation = ++skipSourceGeneration;
+                addSkipRuleButton.setVisibility(View.VISIBLE);
+                addSkipRuleButton.setEnabled(true);
+                addSkipRuleButton.setText(R.string.audio_skip_add_rule_short);
+                addSkipRuleButton.setContentDescription(addSkipRuleButton.getText());
+                observeSkipSnapshot(generation, observedMedia, sourceUri);
+            });
         });
     }
 
@@ -462,32 +494,46 @@ public class AudioPlayerFragment extends Fragment implements
         skipAnalysisButton.setVisibility(View.VISIBLE);
         skipAnalysisButton.setEnabled(snapshot.status != SkipAnalysisStatus.NOT_ANALYZED
                 && (!snapshot.occurrences.isEmpty() || !snapshot.detections.isEmpty()));
+        CharSequence accessibilityDescription;
         if (snapshot.status == SkipAnalysisStatus.ANALYZING) {
-            skipAnalysisButton.setText(getString(R.string.audio_skip_playback_analyzing));
+            skipAnalysisButton.setText(getString(R.string.audio_skip_playback_analyzing_short));
+            accessibilityDescription = getString(R.string.audio_skip_playback_analyzing);
         } else if (snapshot.status == SkipAnalysisStatus.WAITING_FOR_AUDIO) {
-            skipAnalysisButton.setText(getString(R.string.audio_skip_playback_waiting_for_audio));
+            skipAnalysisButton.setText(getString(R.string.audio_skip_playback_waiting_for_audio_short));
+            accessibilityDescription = getString(R.string.audio_skip_playback_waiting_for_audio);
         } else if (snapshot.status == SkipAnalysisStatus.WINDOW_READY) {
             skipAnalysisButton.setText(snapshot.occurrences.isEmpty() && !snapshot.detections.isEmpty()
-                    ? getString(R.string.audio_skip_playback_diagnostics_only,
+                    ? getString(R.string.audio_skip_playback_diagnostics_only_short,
                     snapshot.detections.size())
-                    : getString(R.string.audio_skip_playback_window_ready,
+                    : getString(R.string.audio_skip_playback_window_ready_short,
                     snapshot.occurrences.size()));
+            accessibilityDescription = snapshot.occurrences.isEmpty() && !snapshot.detections.isEmpty()
+                    ? getString(R.string.audio_skip_playback_diagnostics_only, snapshot.detections.size())
+                    : getString(R.string.audio_skip_playback_window_ready, snapshot.occurrences.size());
         } else if (snapshot.status == SkipAnalysisStatus.DOWNLOAD_REQUIRED) {
-            skipAnalysisButton.setText(getString(R.string.audio_skip_playback_download_required));
+            skipAnalysisButton.setText(getString(R.string.audio_skip_playback_download_required_short));
+            accessibilityDescription = getString(R.string.audio_skip_playback_download_required);
         } else if (snapshot.status == SkipAnalysisStatus.READY) {
             skipAnalysisButton.setText(snapshot.occurrences.isEmpty()
-                    ? getString(R.string.audio_skip_playback_diagnostics_only,
+                    ? getString(R.string.audio_skip_playback_diagnostics_only_short,
                     snapshot.detections.size())
-                    : getString(R.string.audio_skip_playback_ready, snapshot.occurrences.size()));
+                    : getString(R.string.audio_skip_playback_ready_short, snapshot.occurrences.size()));
+            accessibilityDescription = snapshot.occurrences.isEmpty()
+                    ? getString(R.string.audio_skip_playback_diagnostics_only, snapshot.detections.size())
+                    : getString(R.string.audio_skip_playback_ready, snapshot.occurrences.size());
         } else if (snapshot.status == SkipAnalysisStatus.NO_MATCHES) {
             skipAnalysisButton.setText(snapshot.detections.isEmpty()
-                    ? getString(R.string.audio_skip_playback_no_matches)
-                    : getString(R.string.audio_skip_playback_diagnostics_only,
+                    ? getString(R.string.audio_skip_playback_no_matches_short)
+                    : getString(R.string.audio_skip_playback_diagnostics_only_short,
                     snapshot.detections.size()));
+            accessibilityDescription = snapshot.detections.isEmpty()
+                    ? getString(R.string.audio_skip_playback_no_matches)
+                    : getString(R.string.audio_skip_playback_diagnostics_only, snapshot.detections.size());
         } else {
-            skipAnalysisButton.setText(getString(R.string.audio_skip_playback_error));
+            skipAnalysisButton.setText(getString(R.string.audio_skip_playback_error_short));
+            accessibilityDescription = getString(R.string.audio_skip_playback_error);
         }
-        skipAnalysisButton.setContentDescription(skipAnalysisButton.getText());
+        skipAnalysisButton.setContentDescription(accessibilityDescription);
     }
 
     private void showSkipAnalysisDialog() {
@@ -533,7 +579,13 @@ public class AudioPlayerFragment extends Fragment implements
 
     @Subscribe(threadMode = ThreadMode.MAIN)
     public void onPlayerStatusEvent(PlayerStatusEvent event) {
-        loadMediaInfo(false);
+        updatePlaybackButton();
+        if (currentMedia == null || currentMedia.getId()
+                != PlaybackPreferences.getCurrentlyPlayingFeedMediaId()) {
+            loadMediaInfo(false);
+        } else {
+            refreshSkipAnalysisSource();
+        }
     }
 
     @Subscribe(threadMode = ThreadMode.MAIN)
@@ -564,9 +616,6 @@ public class AudioPlayerFragment extends Fragment implements
                 }
             }
         };
-        if (currentMedia != null) {
-            subscribeToSkipAnalysis();
-        }
         txtvRev.setText(NumberFormat.getInstance().format(UserPreferences.getRewindSecs()));
         txtvFF.setText(NumberFormat.getInstance().format(UserPreferences.getFastForwardSecs()));
     }
@@ -615,6 +664,7 @@ public class AudioPlayerFragment extends Fragment implements
             progressIndicator.setVisibility(View.VISIBLE);
         } else if (event.hasEnded()) {
             progressIndicator.setVisibility(View.GONE);
+            refreshSkipAnalysisSource();
         } else if (currentMedia != null && !currentMedia.localFileAvailable()) {
             sbPosition.setSecondaryProgress((int) (event.getProgress() * sbPosition.getMax()));
         } else {

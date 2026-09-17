@@ -57,6 +57,25 @@ public class SkipAudioDecoderTest {
         assertThrows(IOException.class, () -> accumulator.append(0.25f, 600_003_000, 125));
     }
 
+    @Test
+    public void previewAccumulatorRetainsSourceChannelsAndSampleRate() throws IOException {
+        SkipAudioDecoder.NativePcmAccumulator accumulator =
+                new SkipAudioDecoder.NativePcmAccumulator(1_000, 1_001, 48_000, 2);
+        double frameUs = 1_000_000.0 / 48_000;
+        for (int frame = 0; frame < 48; frame++) {
+            accumulator.append(new float[] {0.25f, -0.5f}, 1_000_000 + frame * frameUs, frameUs);
+        }
+
+        SkipAudioDecoder.DecodedAudio result = accumulator.result(false);
+
+        assertTrue(result.complete);
+        assertEquals(48_000, result.sampleRate);
+        assertEquals(2, result.channels);
+        assertEquals(96, result.samples.length);
+        assertEquals(0.25f, result.samples[0], 0.000001f);
+        assertEquals(-0.5f, result.samples[1], 0.000001f);
+    }
+
     private static double appendPcm(SkipAudioDecoder.PcmAccumulator accumulator, int sampleRate,
                                     long startMs, long endMs) throws IOException {
         double frameUs = 1_000_000.0 / sampleRate;

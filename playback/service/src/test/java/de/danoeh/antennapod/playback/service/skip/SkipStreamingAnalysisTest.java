@@ -39,6 +39,7 @@ public class SkipStreamingAnalysisTest {
         AudioDecoderShadow.unavailable = false;
         AudioDecoderShadow.audio = null;
         AudioDecoderShadow.calls = 0;
+        AudioDecoderShadow.fetchMissing = false;
         AudioDecoderShadow.unavailableAfterCalls = Integer.MAX_VALUE;
         StreamingSourceShadow.available = true;
     }
@@ -67,6 +68,7 @@ public class SkipStreamingAnalysisTest {
             assertTrue(ready.await(5, TimeUnit.SECONDS));
             assertFalse(task.isDone());
             assertFalse(result.get().coverage.isEmpty());
+            assertTrue(AudioDecoderShadow.fetchMissing);
         }
     }
 
@@ -213,6 +215,35 @@ public class SkipStreamingAnalysisTest {
         }
     }
 
+    @Test
+    public void sharedJinglesPairAfterSeekingWithoutLookbehind() throws Exception {
+        String betweenFeedId = UUID.randomUUID().toString();
+        float[] jingle = randomAudio(4_000, 97);
+        SkipSample start = new SkipSample("start", SkipMarker.START, 500, 0,
+                SkipFingerprint.fromPcm(jingle, 8_000));
+        manager.saveRule(betweenFeedId, new SkipRule("shared", "Promotion", true,
+                SkipRule.Type.BETWEEN, 10_000, 40_000, SkipRule.MissingEndBehavior.UNTOUCHED,
+                0, 0, 0, 0, Collections.singletonList(start)).withUseStartAsEnd(true));
+        AudioDecoderShadow.audio = new float[120_000 * 8];
+        System.arraycopy(jingle, 0, AudioDecoderShadow.audio, 40_000 * 8, jingle.length);
+        System.arraycopy(jingle, 0, AudioDecoderShadow.audio, 60_000 * 8, jingle.length);
+        CountDownLatch ready = new CountDownLatch(1);
+        AtomicReference<SkipAnalysisSnapshot> result = new AtomicReference<>();
+        try (SkipSubscription subscription = manager.observe(betweenFeedId, "episode", snapshot -> {
+            if (snapshot.status == SkipAnalysisStatus.WINDOW_READY && !snapshot.occurrences.isEmpty()) {
+                result.set(snapshot);
+                ready.countDown();
+            }
+        })) {
+            manager.analyze(betweenFeedId, "episode", Uri.parse("skip-cache://shared-jingles"),
+                    120_000, 39_000, SkipPriority.CURRENT_PLAYBACK);
+            assertTrue(ready.await(5, TimeUnit.SECONDS));
+            assertEquals(40_000, result.get().occurrences.get(0).startMs, SkipFingerprint.HOP_MS);
+            assertEquals(60_500, result.get().occurrences.get(0).endMs, SkipFingerprint.HOP_MS);
+            assertTrue(result.get().detections.isEmpty());
+        }
+    }
+
     private static SkipRule fixedRule() {
         int[] hashes = new int[61];
         Arrays.fill(hashes, 0x456789ab);
@@ -261,11 +292,20 @@ public class SkipStreamingAnalysisTest {
         private static volatile boolean unavailable;
         private static volatile float[] audio;
         private static volatile int calls;
+        private static volatile boolean fetchMissing;
         private static volatile int unavailableAfterCalls;
 
         @Implementation
         protected static SkipAudioDecoder.DecodedAudio decode(Context context, Uri uri, long startMs, long endMs)
                 throws SkipStreamingSource.UnavailableException {
+            return decode(context, uri, startMs, endMs, false);
+        }
+
+        @Implementation
+        protected static SkipAudioDecoder.DecodedAudio decode(Context context, Uri uri, long startMs, long endMs,
+                                                               boolean shouldFetchMissing)
+                throws SkipStreamingSource.UnavailableException {
+            fetchMissing = shouldFetchMissing;
             if (unavailable) {
                 throw new SkipStreamingSource.UnavailableException("cache miss");
             }
