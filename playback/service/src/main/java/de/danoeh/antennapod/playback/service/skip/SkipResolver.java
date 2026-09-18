@@ -82,7 +82,7 @@ public final class SkipResolver {
                 if (endMs > windowEnd && !maximumEndsWindow) {
                     addMissingEnd(occurrences, detections, rule, openStart, episodeDurationMs, coverage);
                     addMissingStart(detections, rule, hit.end, episodeDurationMs, coverage);
-                    openStart = hit.start;
+                    openStart = nextStart(rule, openStart, hit.start, episodeDurationMs);
                     continue;
                 }
                 if (intervalMs < rule.minDurationMs) {
@@ -111,12 +111,12 @@ public final class SkipResolver {
                         detections.add(detection(rule, openStart, SkipDetection.Reason.PENDING));
                         detections.add(detection(rule, hit.end, SkipDetection.Reason.PENDING));
                     }
-                    openStart = hit.start;
+                    openStart = nextStart(rule, openStart, hit.start, episodeDurationMs);
                     continue;
                 } else if (!isCovered(coverage, openStart.timeMs, hit.end.timeMs)) {
                     detections.add(detection(rule, openStart, SkipDetection.Reason.PENDING));
                     detections.add(detection(rule, hit.end, SkipDetection.Reason.PENDING));
-                    openStart = hit.start;
+                    openStart = nextStart(rule, openStart, hit.start, episodeDurationMs);
                     continue;
                 } else {
                     addOccurrence(occurrences, rule, openStart.timeMs, endMs,
@@ -148,6 +148,15 @@ public final class SkipResolver {
         return 0;
     }
 
+    private static SkipMarkerHit nextStart(SkipRule rule, SkipMarkerHit openStart,
+                                           SkipMarkerHit candidate, long episodeDurationMs) {
+        if (!rule.useStartAsEnd || candidate == null
+                || candidate.timeMs > relevantWindowEnd(rule, openStart.timeMs, episodeDurationMs)) {
+            return candidate;
+        }
+        return null;
+    }
+
     private static List<HitOccurrence> hitOccurrences(SkipRule rule, List<SkipMarkerHit> hits,
                                                        long episodeDurationMs) {
         List<SkipMarkerHit> matching = new ArrayList<>();
@@ -164,7 +173,7 @@ public final class SkipResolver {
         for (SkipMarkerHit hit : matching) {
             HitOccurrence previous = result.isEmpty() ? null : result.get(result.size() - 1);
             if (previous == null || hit.timeMs - clusterStartMs > SAME_OCCURRENCE_MS
-                    && !nearExistingRole(previous, hit)
+                    && !nearExistingRole(rule, previous, hit)
                     && !tooCloseSimilarOppositeMarker(rule, previous, hit)) {
                 result.add(new HitOccurrence());
                 clusterStartMs = hit.timeMs;
@@ -183,9 +192,19 @@ public final class SkipResolver {
         return result;
     }
 
-    private static boolean nearExistingRole(HitOccurrence occurrence, SkipMarkerHit hit) {
+    private static boolean nearExistingRole(SkipRule rule, HitOccurrence occurrence, SkipMarkerHit hit) {
         SkipMarkerHit existing = hit.marker == SkipMarker.START ? occurrence.start : occurrence.end;
-        return existing != null && hit.timeMs - existing.timeMs <= SAME_OCCURRENCE_MS;
+        if (existing == null) {
+            return false;
+        }
+        long duplicateWindowMs = SAME_OCCURRENCE_MS;
+        if (existing.sampleId.equals(hit.sampleId)) {
+            SkipSample sample = sample(rule, hit.sampleId);
+            if (sample != null) {
+                duplicateWindowMs = Math.max(duplicateWindowMs, sample.durationMs / 2);
+            }
+        }
+        return hit.timeMs - existing.timeMs <= duplicateWindowMs;
     }
 
     private static boolean tooCloseSimilarOppositeMarker(SkipRule rule, HitOccurrence occurrence,

@@ -68,8 +68,8 @@ public class ChapterSeekBar extends androidx.appcompat.widget.AppCompatSeekBar {
         paintBackground.setAlpha(128);
         paintBuffer.setColor(ThemeUtils.getColorFromAttr(getContext(), R.attr.colorSurfaceVariant));
         paintBuffer.setAlpha(220);
-        paintCoverage.setColor(ThemeUtils.getColorFromAttr(getContext(), R.attr.colorSurfaceContainerHighest));
-        paintCoverage.setAlpha(180);
+        paintCoverage.setColor(ThemeUtils.getColorFromAttr(getContext(), R.attr.icon_green));
+        paintCoverage.setAlpha(90);
         paintDetected.setColor(ThemeUtils.getColorFromAttr(getContext(), R.attr.colorPrimary));
         paintDetected.setAlpha(150);
         paintProgressPrimary.setColor(ThemeUtils.getColorFromAttr(getContext(), R.attr.colorPrimary));
@@ -126,6 +126,10 @@ public class ChapterSeekBar extends androidx.appcompat.widget.AppCompatSeekBar {
                 setContentDescription(getContext().getString(R.string.audio_skip_playback_error));
             } else {
                 setContentDescription(getContext().getString(R.string.audio_skip_playback_analyzing));
+            }
+            if (snapshot.status == SkipAnalysisStatus.WAITING_FOR_AUDIO && !snapshot.occurrences.isEmpty()) {
+                setContentDescription(getContext().getString(
+                        R.string.audio_skip_playback_waiting_with_skips, snapshot.occurrences.size()));
             }
         }
         invalidate();

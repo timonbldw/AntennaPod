@@ -224,7 +224,10 @@ public class ChaptersFragment extends AppCompatDialogFragment {
         if (snapshot.status == SkipAnalysisStatus.ANALYZING) {
             status = getString(R.string.audio_skip_playback_analyzing);
         } else if (snapshot.status == SkipAnalysisStatus.WAITING_FOR_AUDIO) {
-            status = getString(R.string.audio_skip_playback_waiting_for_audio);
+            status = snapshot.occurrences.isEmpty()
+                    ? getString(R.string.audio_skip_playback_waiting_for_audio)
+                    : getString(R.string.audio_skip_playback_waiting_with_skips,
+                    snapshot.occurrences.size());
         } else if (snapshot.status == SkipAnalysisStatus.WINDOW_READY) {
             status = snapshot.occurrences.isEmpty() && !snapshot.detections.isEmpty()
                     ? getString(R.string.audio_skip_playback_diagnostics_only,
