@@ -115,7 +115,7 @@ public class SkipStreamingSourceTest {
     }
 
     @Test
-    public void readAcrossMissingFragmentThrowsInsteadOfReturningPartialData() throws Exception {
+    public void readAcrossMissingFragmentReturnsAvailablePrefixAndRetainsMiss() throws Exception {
         SkipStreamingSource.Registration registration = SkipStreamingSource.register(
                 cache, Uri.parse("https://example.com/audio.mp3"));
         cache.applyContentMetadataMutations(registration.cacheKey,
@@ -123,12 +123,44 @@ public class SkipStreamingSourceTest {
         writeCache(registration.cacheKey, new byte[65_536]);
         writeCache(registration.cacheKey, 131_072, new byte[65_536]);
         try (SkipStreamingSource.CachedMediaDataSource source = SkipStreamingSource.open(registration.uri)) {
+            source.setDecoderPhase("extractor initialization");
+            byte[] result = new byte[] {9, 8, 7};
+            assertEquals(1, source.readAt(65_535, result, 0, 3));
+            assertArrayEquals(new byte[] {0, 8, 7}, result);
+            source.throwIfUnavailable();
+            source.setDecoderPhase("sample reading");
             try {
-                source.readAt(65_535, new byte[3], 0, 3);
-                fail("Expected unavailable intervening fragment");
+                source.throwIfCacheMiss();
+                fail("Expected retained intervening fragment miss");
             } catch (SkipStreamingSource.UnavailableException expected) {
-                assertEquals("Requested audio bytes are not cached", expected.getMessage());
+                assertEquals("Requested audio bytes are not cached at byte 65536 (length 2)"
+                        + " during extractor initialization", expected.getMessage());
             }
+        }
+    }
+
+    @Test
+    public void hardFailureAfterShortReadIsNotClearedOrMasked() throws Exception {
+        SkipStreamingSource.Registration registration = SkipStreamingSource.register(
+                cache, Uri.parse("https://example.com/audio.mp3"));
+        cache.applyContentMetadataMutations(registration.cacheKey,
+                ContentMetadataMutations.setContentLength(new ContentMetadataMutations(), 8));
+        writeCache(registration.cacheKey, new byte[] {1, 2, 3, 4});
+
+        SkipStreamingSource.CachedMediaDataSource source = SkipStreamingSource.open(registration.uri);
+        assertEquals(4, source.readAt(0, new byte[8], 0, 8));
+        source.close();
+        try {
+            source.readAt(0, new byte[1], 0, 1);
+            fail("Expected closed source failure");
+        } catch (SkipStreamingSource.UnavailableException expected) {
+            assertEquals("Streaming cache source is closed", expected.getMessage());
+        }
+        try {
+            source.throwIfUnavailable();
+            fail("Expected retained closed source failure");
+        } catch (SkipStreamingSource.UnavailableException expected) {
+            assertEquals("Streaming cache source is closed", expected.getMessage());
         }
     }
 
@@ -145,11 +177,12 @@ public class SkipStreamingSourceTest {
             byte[] result = new byte[3];
             assertEquals(3, source.readAt(1, result, 0, result.length));
             assertArrayEquals(new byte[] {11, 12, 13}, result);
+            assertEquals(0, source.readAt(4, result, 0, result.length));
             try {
-                source.readAt(4, result, 0, result.length);
-                fail("Expected unavailable cache hole");
+                source.throwIfCacheMiss();
+                fail("Expected unavailable cache hole side channel");
             } catch (SkipStreamingSource.UnavailableException expected) {
-                assertEquals("Requested audio bytes are not cached", expected.getMessage());
+                assertEquals("Requested audio bytes are not cached at byte 4 (length 3)", expected.getMessage());
             }
         }
     }
@@ -194,27 +227,45 @@ public class SkipStreamingSourceTest {
         writeCache(registration.cacheKey, cached);
 
         try (SkipStreamingSource.CachedMediaDataSource source = SkipStreamingSource.open(registration.uri)) {
-            try {
-                source.readAt(128, new byte[1], 0, 1);
-                fail("Expected unavailable optional probe");
-            } catch (SkipStreamingSource.UnavailableException expected) {
-                source.acceptOptionalMp3TailProbe("audio/mpeg");
-            }
+            assertEquals(0, source.readAt(128, new byte[1], 0, 1));
+            source.acceptOptionalMp3TailProbe("audio/mpeg");
             byte[] result = new byte[4];
             assertEquals(4, source.readAt(0, result, 0, result.length));
             source.throwIfUnavailable();
             assertArrayEquals(cached, result);
+            assertEquals(0, source.readAt(4, new byte[1], 0, 1));
             try {
-                source.readAt(4, new byte[1], 0, 1);
-                fail("Expected unavailable required read");
-            } catch (SkipStreamingSource.UnavailableException expected) {
-                try {
-                    source.throwIfUnavailable();
-                    fail("Expected required read failure to remain visible");
-                } catch (SkipStreamingSource.UnavailableException unavailable) {
-                    assertEquals("Requested audio bytes are not cached", unavailable.getMessage());
-                }
+                source.throwIfCacheMiss();
+                fail("Expected required read failure to remain visible");
+            } catch (SkipStreamingSource.UnavailableException unavailable) {
+                assertEquals("Requested audio bytes are not cached at byte 4 (length 1)",
+                        unavailable.getMessage());
             }
+        }
+    }
+
+    @Test
+    public void identifiedMp3CanAcceptShortInitializationRead() throws Exception {
+        SkipStreamingSource.Registration registration = SkipStreamingSource.register(
+                cache, Uri.parse("https://example.com/audio.mp3"));
+        cache.applyContentMetadataMutations(registration.cacheKey,
+                ContentMetadataMutations.setContentLength(new ContentMetadataMutations(), 256));
+        writeCache(registration.cacheKey, new byte[] {10, 11, 12, 13});
+
+        try (SkipStreamingSource.CachedMediaDataSource source = SkipStreamingSource.open(registration.uri)) {
+            source.setDecoderPhase("extractor initialization");
+            byte[] result = new byte[8];
+            assertEquals(4, source.readAt(0, result, 0, result.length));
+            try {
+                source.throwIfCacheMiss();
+                fail("Expected retained initialization miss");
+            } catch (SkipStreamingSource.UnavailableException expected) {
+                assertEquals("Requested audio bytes are not cached at byte 4 (length 4)"
+                        + " during extractor initialization", expected.getMessage());
+            }
+            source.acceptOptionalMp3TailProbe("audio/mpeg");
+            source.throwIfUnavailable();
+            source.throwIfCacheMiss();
         }
     }
 
@@ -226,22 +277,14 @@ public class SkipStreamingSourceTest {
                 ContentMetadataMutations.setContentLength(new ContentMetadataMutations(), 256));
 
         try (SkipStreamingSource.CachedMediaDataSource source = SkipStreamingSource.open(registration.uri)) {
+            assertEquals(0, source.readAt(0, new byte[1], 0, 1));
+            assertEquals(0, source.readAt(128, new byte[1], 0, 1));
             try {
-                source.readAt(0, new byte[1], 0, 1);
-                fail("Expected unavailable prefix");
-            } catch (SkipStreamingSource.UnavailableException expected) {
-                try {
-                    source.readAt(128, new byte[1], 0, 1);
-                    fail("Expected unavailable tail probe");
-                } catch (SkipStreamingSource.UnavailableException tailProbe) {
-                    assertEquals("Requested audio bytes are not cached", tailProbe.getMessage());
-                }
-                try {
-                    source.acceptOptionalMp3TailProbe("audio/mpeg");
-                    fail("Expected prefix miss to remain visible");
-                } catch (SkipStreamingSource.UnavailableException unavailable) {
-                    assertEquals("Requested audio bytes are not cached", unavailable.getMessage());
-                }
+                source.acceptOptionalMp3TailProbe("audio/mpeg");
+                fail("Expected prefix miss to remain visible");
+            } catch (SkipStreamingSource.UnavailableException unavailable) {
+                assertEquals("Requested audio bytes are not cached at byte 0 (length 1)",
+                        unavailable.getMessage());
             }
         }
     }
@@ -254,16 +297,13 @@ public class SkipStreamingSourceTest {
                 ContentMetadataMutations.setContentLength(new ContentMetadataMutations(), 256));
 
         try (SkipStreamingSource.CachedMediaDataSource source = SkipStreamingSource.open(registration.uri)) {
+            assertEquals(0, source.readAt(128, new byte[1], 0, 1));
             try {
-                source.readAt(128, new byte[1], 0, 1);
-                fail("Expected unavailable tail");
-            } catch (SkipStreamingSource.UnavailableException expected) {
-                try {
-                    source.acceptOptionalMp3TailProbe("audio/aac");
-                    fail("Expected non-MP3 miss to remain visible");
-                } catch (SkipStreamingSource.UnavailableException unavailable) {
-                    assertEquals("Requested audio bytes are not cached", unavailable.getMessage());
-                }
+                source.acceptOptionalMp3TailProbe("audio/aac");
+                fail("Expected non-MP3 miss to remain visible");
+            } catch (SkipStreamingSource.UnavailableException unavailable) {
+                assertEquals("Requested audio bytes are not cached at byte 128 (length 1)",
+                        unavailable.getMessage());
             }
         }
     }
@@ -307,12 +347,8 @@ public class SkipStreamingSourceTest {
                 ContentMetadataMutations.setContentLength(new ContentMetadataMutations(), 1));
 
         try (SkipStreamingSource.CachedMediaDataSource source = SkipStreamingSource.open(registration.uri)) {
-            try {
-                source.readAt(0, new byte[1], 0, 1);
-                fail("Expected cache-only miss");
-            } catch (SkipStreamingSource.UnavailableException expected) {
-                assertEquals("Requested audio bytes are not cached", expected.getMessage());
-            }
+            assertEquals(0, source.readAt(0, new byte[1], 0, 1));
+            assertTrue(source.isCacheMiss());
         }
         assertEquals(0, sources.get());
     }

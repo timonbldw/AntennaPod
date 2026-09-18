@@ -2,6 +2,8 @@ package de.danoeh.antennapod.playback.service.skip;
 
 import android.content.Context;
 import android.net.Uri;
+import android.util.Log;
+import de.danoeh.antennapod.playback.service.BuildConfig;
 
 import java.io.File;
 import java.io.IOException;
@@ -131,32 +133,53 @@ public final class SkipManager {
 
     public synchronized SkipTask analyze(String feedId, String episodeId, Uri audioUri, long durationMs,
                                           long positionMs, SkipPriority priority) {
+        return analyze(feedId, episodeId, audioUri, durationMs, positionMs, -1, priority, true);
+    }
+
+    public synchronized SkipTask analyzeForPlayback(String feedId, String episodeId, Uri audioUri,
+                                                     long durationMs, long positionMs,
+                                                     SkipPriority priority) {
+        return analyze(feedId, episodeId, audioUri, durationMs, positionMs, -1, priority, false);
+    }
+
+    public synchronized SkipTask analyzeForPlayback(String feedId, String episodeId, Uri audioUri,
+                                                     long durationMs, long positionMs, long bufferedPositionMs,
+                                                     SkipPriority priority) {
+        return analyze(feedId, episodeId, audioUri, durationMs, positionMs, bufferedPositionMs, priority, false);
+    }
+
+    private synchronized SkipTask analyze(String feedId, String episodeId, Uri audioUri, long durationMs,
+                                           long positionMs, long bufferedPositionMs, SkipPriority priority,
+                                           boolean fetchMissing) {
         String validFeedId = requireId(feedId);
         String validEpisodeId = requireId(episodeId);
         validateAnalysis(audioUri, durationMs, positionMs);
         String key = key(validFeedId, validEpisodeId);
         AnalysisJob existing = jobs.get(key);
         if (existing != null && existing.noEnabledRules && !existing.task.isCancelled()
-                && existing.audioUri.equals(audioUri) && existing.requestedDurationMs == durationMs) {
+                && existing.audioUri.equals(audioUri) && existing.requestedDurationMs == durationMs
+                && existing.fetchMissing == fetchMissing) {
             return existing.task;
         }
         if (existing != null && !existing.task.isDone()
                 && (reusableSource(audioUri) || SkipStreamingSource.isStreaming(audioUri))
                 && existing.audioUri.equals(audioUri)
-                && (existing.requestedDurationMs == durationMs || SkipStreamingSource.isStreaming(audioUri))) {
+                && (existing.requestedDurationMs == durationMs || SkipStreamingSource.isStreaming(audioUri))
+                && existing.fetchMissing == fetchMissing) {
             existing.durationMs = durationMs;
             existing.requestedDurationMs = durationMs;
             existing.positionMs = positionMs;
+            existing.bufferedPositionMs = bufferedPositionMs;
             existing.priority = priority == null ? SkipPriority.BACKGROUND : priority;
             executor.reprioritize(existing.task, existing.priority);
-            existing.wake();
+            existing.wake(true);
             return existing.task;
         }
         if (existing != null) {
             existing.task.cancel();
         }
         AnalysisJob job = new AnalysisJob(validFeedId, validEpisodeId, audioUri, durationMs,
-                positionMs, priority, null, null);
+                positionMs, bufferedPositionMs, priority, null, null, -1, -1, fetchMissing);
         jobs.put(key, job);
         snapshots.put(key, new SkipAnalysisSnapshot(feedId, episodeId, SkipAnalysisStatus.ANALYZING,
                 0, null, durationMs, Collections.emptyList(), Collections.emptyList(), null,
@@ -181,7 +204,18 @@ public final class SkipManager {
     }
 
     public synchronized boolean updateStreamingPosition(String feedId, String episodeId, long positionMs,
-                                                         float speed) {
+                                                          float speed) {
+        return updateStreamingPosition(feedId, episodeId, positionMs, speed, -1);
+    }
+
+    public synchronized boolean updateStreamingPosition(String feedId, String episodeId, long positionMs,
+                                                          float speed, long bufferedPositionMs) {
+        return updateStreamingPosition(feedId, episodeId, positionMs, speed, bufferedPositionMs, false);
+    }
+
+    public synchronized boolean updateStreamingPosition(String feedId, String episodeId, long positionMs,
+                                                          float speed, long bufferedPositionMs,
+                                                          boolean resetAnalysisPosition) {
         if (positionMs < 0 || Float.isNaN(speed) || Float.isInfinite(speed) || speed <= 0) {
             throw new IllegalArgumentException("Invalid streaming playback position");
         }
@@ -190,10 +224,14 @@ public final class SkipManager {
             return false;
         }
         job.positionMs = positionMs;
+        job.bufferedPositionMs = bufferedPositionMs;
+        if (resetAnalysisPosition) {
+            job.streamingAnalysisPositionMs = -1;
+        }
         job.playbackSpeed = speed;
         job.priority = SkipPriority.CURRENT_PLAYBACK;
         executor.reprioritize(job.task, job.priority);
-        job.wake();
+        job.wake(resetAnalysisPosition);
         return true;
     }
 
@@ -303,9 +341,9 @@ public final class SkipManager {
         }
         long hint = Math.max(0, Math.min(positionMs, durationMs));
         AnalysisJob job = new AnalysisJob("unsaved", "unsaved", audioUri, durationMs, 0,
-                SkipPriority.HIGH, Collections.singletonList(rule.withEnabled(true)), callback,
+                -1, SkipPriority.HIGH, Collections.singletonList(rule.withEnabled(true)), callback,
                 bounded ? Math.max(0, hint - 5_000) : -1,
-                bounded ? testEndPosition(rule, hint, durationMs) : -1);
+                bounded ? testEndPosition(rule, hint, durationMs) : -1, true);
         job.enqueue();
         return job.task;
     }
@@ -315,10 +353,13 @@ public final class SkipManager {
         private final String episodeId;
         private final String key;
         private final Uri audioUri;
+        private final boolean fetchMissing;
         private volatile long requestedDurationMs;
         private final SkipAnalysisCallback callback;
         private final SkipTask task = new SkipTask();
         private volatile long positionMs;
+        private volatile long bufferedPositionMs;
+        private volatile long streamingAnalysisPositionMs = -1;
         private volatile SkipPriority priority;
         private volatile float playbackSpeed = 1;
         private List<SkipRule> rules;
@@ -332,23 +373,30 @@ public final class SkipManager {
         private final long analysisEndMs;
         private boolean queued;
         private boolean wakeRequested;
+        private boolean resetStreamingPassRequested;
+        private boolean streamingPassExhausted;
+        private long streamingAnalysisEndMs = -1;
         private boolean streamingUnsupported;
 
         AnalysisJob(String feedId, String episodeId, Uri audioUri, long durationMs, long positionMs,
                     SkipPriority priority, List<SkipRule> rules, SkipAnalysisCallback callback) {
-            this(feedId, episodeId, audioUri, durationMs, positionMs, priority, rules, callback, -1, -1);
+            this(feedId, episodeId, audioUri, durationMs, positionMs, -1, priority, rules, callback, -1, -1,
+                    true);
         }
 
         AnalysisJob(String feedId, String episodeId, Uri audioUri, long durationMs, long positionMs,
-                    SkipPriority priority, List<SkipRule> rules, SkipAnalysisCallback callback,
-                    long analysisStartMs, long analysisEndMs) {
+                    long bufferedPositionMs, SkipPriority priority, List<SkipRule> rules,
+                    SkipAnalysisCallback callback,
+                    long analysisStartMs, long analysisEndMs, boolean fetchMissing) {
             this.feedId = feedId;
             this.episodeId = episodeId;
             key = key(feedId, episodeId);
             this.audioUri = audioUri;
+            this.fetchMissing = fetchMissing;
             this.durationMs = durationMs;
             requestedDurationMs = durationMs;
             this.positionMs = positionMs;
+            this.bufferedPositionMs = bufferedPositionMs;
             this.priority = priority == null ? SkipPriority.BACKGROUND : priority;
             this.rules = rules;
             this.callback = callback;
@@ -363,11 +411,13 @@ public final class SkipManager {
             }
         }
 
-        synchronized void wake() {
+        synchronized void wake(boolean resetStreamingPass) {
+            resetStreamingPassRequested |= resetStreamingPass;
             if (queued) {
-                wakeRequested = true;
+                wakeRequested |= fetchMissing || resetStreamingPass || streamingPassExhausted;
             } else if (identity == null || !SkipStreamingSource.isStreaming(audioUri)
                     || !isCoveredFrom(coverage, streamingWindowStart(), streamingWindowEnd())) {
+                streamingAnalysisPositionMs = -1;
                 enqueue();
             }
         }
@@ -375,6 +425,7 @@ public final class SkipManager {
         @Override
         public void run() {
             boolean continueAnalysis = false;
+            boolean waitingForAudio = false;
             try {
                 checkCancelled();
                 if (identity == null) {
@@ -401,14 +452,74 @@ public final class SkipManager {
                         : SkipStreamingSource.isStreaming(audioUri) ? streamingWindowStart() : 0;
                 long coverageEnd = analysisEndMs >= 0 ? analysisEndMs
                         : SkipStreamingSource.isStreaming(audioUri) ? streamingWindowEnd() : durationMs;
-                if (!isCoveredFrom(coverage, coverageStart, coverageEnd)) {
+                boolean streamingPlayback = SkipStreamingSource.isStreaming(audioUri) && callback == null
+                        && !rules.isEmpty();
+                boolean cacheOnlyPlayback = streamingPlayback && !fetchMissing;
+                boolean streamingPassHasMore = false;
+                boolean streamingCoverageChanged = false;
+                if (cacheOnlyPlayback) {
+                    long startMs;
+                    long endMs;
+                    synchronized (this) {
+                        if (streamingAnalysisPositionMs < 0) {
+                            streamingAnalysisPositionMs = coverageStart;
+                            streamingAnalysisEndMs = coverageEnd;
+                            resetStreamingPassRequested = false;
+                            streamingPassExhausted = false;
+                        }
+                        startMs = firstUncovered(Math.max(coverageStart, streamingAnalysisPositionMs),
+                                streamingAnalysisEndMs, coverage);
+                        if (startMs < streamingAnalysisEndMs) {
+                            startMs -= startMs % SkipFingerprint.HOP_MS;
+                            endMs = Math.min(streamingAnalysisEndMs, startMs + WINDOW_MS);
+                        } else {
+                            endMs = startMs;
+                        }
+                    }
+                    if (startMs < streamingAnalysisEndMs) {
+                        long coveredBefore = coveredDuration(coverage);
+                        if (BuildConfig.DEBUG) {
+                            Log.d("SkipManager", "Cache analysis source=" + identity + " position=" + positionMs
+                                    + " buffered=" + bufferedPositionMs + " window=" + startMs + ".." + endMs
+                                    + " cursor=" + streamingAnalysisPositionMs);
+                        }
+                        try {
+                            analyzeWindow(startMs, endMs);
+                            checkpoint();
+                        } catch (SkipStreamingSource.UnavailableException error) {
+                            if (BuildConfig.DEBUG) {
+                                Log.d("SkipManager", "Cache analysis deferred: " + error.getMessage());
+                            }
+                        }
+                        streamingCoverageChanged = coveredDuration(coverage) > coveredBefore;
+                        checkCancelled();
+                        synchronized (this) {
+                            if (!resetStreamingPassRequested) {
+                                streamingAnalysisPositionMs = Math.max(streamingAnalysisPositionMs, endMs);
+                            }
+                        }
+                    }
+                    synchronized (this) {
+                        if (resetStreamingPassRequested) {
+                            return;
+                        }
+                        streamingPassHasMore = !resetStreamingPassRequested
+                                && firstUncovered(Math.max(coverageStart, streamingAnalysisPositionMs),
+                                streamingAnalysisEndMs, coverage) < streamingAnalysisEndMs;
+                    }
+                    waitingForAudio = !streamingPassHasMore
+                            && !isCoveredFrom(coverage, coverageStart, coverageEnd);
+                    synchronized (this) {
+                        streamingPassExhausted = waitingForAudio;
+                    }
+                } else if (!isCoveredFrom(coverage, coverageStart, coverageEnd)) {
                     long startMs = analysisStartMs >= 0 && firstUncovered(coverageStart, coverageEnd, coverage)
                             < coverageEnd ? firstUncovered(coverageStart, coverageEnd, coverage)
                             : SkipStreamingSource.isStreaming(audioUri)
                             ? firstUncovered(coverageStart, coverageEnd, coverage)
                             : chooseWindowStart(positionMs, coverageEnd, coverage);
                     startMs -= startMs % SkipFingerprint.HOP_MS;
-                    analyzeWindow(startMs, Math.min(coverageEnd, startMs + WINDOW_MS));
+                    waitingForAudio = analyzeWindow(startMs, Math.min(coverageEnd, startMs + WINDOW_MS));
                     checkpoint();
                     checkCancelled();
                 }
@@ -418,14 +529,26 @@ public final class SkipManager {
                 if (callback != null && !done && !occurrences.isEmpty()) {
                     done = true;
                 }
-                boolean streamingPlayback = SkipStreamingSource.isStreaming(audioUri) && callback == null
-                        && !rules.isEmpty();
-                SkipAnalysisStatus status = done ? streamingPlayback ? SkipAnalysisStatus.WINDOW_READY
+                boolean fullyCovered = isFullyCovered(coverage, durationMs);
+                boolean emptyStreamingWindow = streamingPlayback && coverageEnd <= coverageStart
+                        && !fullyCovered;
+                SkipAnalysisStatus status = fullyCovered
+                        ? occurrences.isEmpty() && resolution.detections.isEmpty()
+                        ? SkipAnalysisStatus.NO_MATCHES : SkipAnalysisStatus.READY
+                        : waitingForAudio || emptyStreamingWindow ? SkipAnalysisStatus.WAITING_FOR_AUDIO
+                        : done ? streamingPlayback ? SkipAnalysisStatus.WINDOW_READY
                         : occurrences.isEmpty() && resolution.detections.isEmpty()
                         ? SkipAnalysisStatus.NO_MATCHES : SkipAnalysisStatus.READY
                         : SkipAnalysisStatus.ANALYZING;
-                emit(status, null);
-                if (!done && !task.isCancellationRequested()) {
+                boolean suppressUnchangedProbe = cacheOnlyPlayback && status == SkipAnalysisStatus.ANALYZING
+                        && !streamingCoverageChanged;
+                if (!suppressUnchangedProbe) {
+                    emit(status, null);
+                }
+                boolean moreStreamingAudio = streamingPlayback
+                        && !isCoveredFrom(coverage, streamingWindowStart(), streamingWindowEnd());
+                if (cacheOnlyPlayback ? streamingPassHasMore
+                        : !waitingForAudio && (!done || moreStreamingAudio) && !task.isCancellationRequested()) {
                     continueAnalysis = true;
                 }
             } catch (InterruptedException | CancellationException ignored) {
@@ -437,8 +560,13 @@ public final class SkipManager {
             } finally {
                 synchronized (this) {
                     queued = false;
-                    continueAnalysis |= wakeRequested;
-                    wakeRequested = false;
+                    if ((!continueAnalysis && wakeRequested) || resetStreamingPassRequested) {
+                        streamingAnalysisPositionMs = -1;
+                        streamingAnalysisEndMs = -1;
+                        continueAnalysis = true;
+                        wakeRequested = false;
+                        resetStreamingPassRequested = false;
+                    }
                 }
                 if (continueAnalysis && !task.isCancellationRequested()) {
                     enqueue();
@@ -486,10 +614,14 @@ public final class SkipManager {
         }
 
         private long streamingWindowStart() {
-            return Math.max(0, positionMs - Math.max(STREAM_LOOKBEHIND_MS, longestSampleDuration()));
+            return fetchMissing ? Math.max(0, positionMs - Math.max(STREAM_LOOKBEHIND_MS, longestSampleDuration()))
+                    : positionMs;
         }
 
         private long streamingWindowEnd() {
+            if (bufferedPositionMs >= 0) {
+                return Math.min(durationMs, Math.max(positionMs, bufferedPositionMs));
+            }
             long betweenHorizon = 0;
             for (SkipRule rule : rules) {
                 if (rule.type == SkipRule.Type.BETWEEN) {
@@ -524,7 +656,7 @@ public final class SkipManager {
             return longest;
         }
 
-        private void analyzeWindow(long startMs, long endMs) throws IOException, InterruptedException {
+        private boolean analyzeWindow(long startMs, long endMs) throws IOException, InterruptedException {
             long overlapMs = 0;
             for (SkipRule rule : rules) {
                 for (SkipSample sample : rule.samples) {
@@ -533,17 +665,19 @@ public final class SkipManager {
                     }
                 }
             }
-            long decodeStart = Math.max(0, startMs - overlapMs);
+            long decodeStart = fetchMissing ? Math.max(0, startMs - overlapMs) : startMs;
             decodeStart -= decodeStart % SkipFingerprint.HOP_MS;
             long decodeEnd = Math.min(durationMs, endMs + overlapMs + SkipFingerprint.FRAME_MS);
             SkipAudioDecoder.DecodedAudio decoded = SkipStreamingSource.isStreaming(audioUri)
-                    ? SkipAudioDecoder.decode(context, audioUri, decodeStart, decodeEnd, true)
+                    ? SkipAudioDecoder.decode(context, audioUri, decodeStart, decodeEnd, fetchMissing)
                     : SkipAudioDecoder.decode(context, audioUri, decodeStart, decodeEnd);
             checkCancelled();
             if (reusableSource(audioUri) && !identity.equals(sourceIdentity(audioUri))) {
                 throw new IOException("Audio source changed during decoding");
             }
-            if (!decoded.complete || decoded.startMs > startMs) {
+            boolean cacheOnlyStreaming = SkipStreamingSource.isStreaming(audioUri) && !fetchMissing;
+            if ((!decoded.complete && !decoded.cacheMiss)
+                    || decoded.startMs > startMs && !cacheOnlyStreaming) {
                 if (SkipStreamingSource.isStreaming(audioUri)) {
                     throw new SkipStreamingSource.UnavailableException(
                             "Audio window has incomplete decoder coverage");
@@ -561,15 +695,20 @@ public final class SkipManager {
                 }
                 coverage = trimmed;
                 if (startMs >= durationMs) {
-                    return;
+                    return false;
                 }
             }
+            long coveredStart = Math.max(startMs, decoded.startMs);
             long safeEnd = decoded.eof ? Math.min(endMs, durationMs)
                     : Math.min(endMs, actualEnd - overlapMs - SkipFingerprint.FRAME_MS);
             if (decoded.complete && actualEnd >= decodeEnd - 1) {
                 safeEnd = Math.min(endMs, durationMs);
             }
-            if (safeEnd <= startMs) {
+            if (BuildConfig.DEBUG && cacheOnlyStreaming) {
+                Log.d("SkipManager", "Cache decoded=" + decoded.startMs + ".." + actualEnd
+                        + " verified=" + coveredStart + ".." + safeEnd + " cacheMiss=" + decoded.cacheMiss);
+            }
+            if (safeEnd <= coveredStart) {
                 if (SkipStreamingSource.isStreaming(audioUri)) {
                     throw new SkipStreamingSource.UnavailableException("Audio window made no analysis progress");
                 }
@@ -586,7 +725,7 @@ public final class SkipManager {
                         checkCancelled();
                         for (SkipFingerprint.Match match : SkipFingerprint.findMatches(sample.fingerprint, target,
                                 decoded.startMs, 0.82f)) {
-                            if (match.startMs >= startMs && match.startMs < safeEnd
+                            if (match.startMs >= coveredStart && match.startMs < safeEnd
                                     && match.startMs + sample.durationMs <= actualEnd + 1) {
                                 newHits.add(new SkipMarkerHit(rule.id, sample.id, sample.marker,
                                         match.startMs, match.score));
@@ -596,7 +735,8 @@ public final class SkipManager {
                 }
                 hits = mergeHits(hits, newHits);
             }
-            coverage = mergeCoverage(coverage, Collections.singletonList(new SkipCoverage(startMs, safeEnd)));
+            coverage = mergeCoverage(coverage, Collections.singletonList(new SkipCoverage(coveredStart, safeEnd)));
+            return decoded.cacheMiss || coveredStart > startMs;
         }
 
         private void checkCancelled() throws InterruptedException {
@@ -691,6 +831,14 @@ public final class SkipManager {
 
     private static boolean isFullyCovered(List<SkipCoverage> coverage, long durationMs) {
         return firstUncovered(0, durationMs, coverage) >= durationMs;
+    }
+
+    private static long coveredDuration(List<SkipCoverage> coverage) {
+        long durationMs = 0;
+        for (SkipCoverage range : mergeCoverage(coverage, Collections.emptyList())) {
+            durationMs += range.endMs - range.startMs;
+        }
+        return durationMs;
     }
 
     static long chooseWindowStart(long positionMs, long durationMs, List<SkipCoverage> coverage) {

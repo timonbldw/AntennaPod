@@ -76,6 +76,21 @@ public class SkipAudioDecoderTest {
         assertEquals(-0.5f, result.samples[1], 0.000001f);
     }
 
+    @Test
+    public void cacheMissRetainsDecodedRangeAndDoesNotBecomeEof() {
+        SkipAudioDecoder.DecodedAudio decoded = new SkipAudioDecoder.DecodedAudio(
+                1_000, new float[] {0.25f}, 1, false, false);
+
+        SkipAudioDecoder.DecodedAudio result = decoded.withCacheMiss();
+
+        assertEquals(1_000, result.startMs);
+        assertEquals(1, result.samples.length);
+        assertEquals(1, result.durationMs);
+        assertFalse(result.complete);
+        assertFalse(result.eof);
+        assertTrue(result.cacheMiss);
+    }
+
     private static double appendPcm(SkipAudioDecoder.PcmAccumulator accumulator, int sampleRate,
                                     long startMs, long endMs) throws IOException {
         double frameUs = 1_000_000.0 / sampleRate;
