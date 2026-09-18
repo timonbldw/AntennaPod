@@ -1,8 +1,10 @@
 package de.danoeh.antennapod.ui.screen.feed.preferences.audioskip;
 
 import android.content.Context;
+import android.content.res.ColorStateList;
 import android.graphics.Canvas;
 import android.graphics.Paint;
+import android.media.MediaDataSource;
 import android.media.MediaPlayer;
 import android.net.Uri;
 import android.os.Handler;
@@ -13,10 +15,10 @@ import android.util.Log;
 import android.view.LayoutInflater;
 import android.view.MotionEvent;
 import android.view.View;
+import android.view.inputmethod.EditorInfo;
 import android.widget.ArrayAdapter;
 import android.widget.AdapterView;
 import android.widget.Button;
-import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
@@ -26,6 +28,8 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.core.util.Consumer;
+import androidx.core.view.ViewCompat;
+import androidx.core.view.WindowInsetsCompat;
 
 import com.google.android.material.button.MaterialButton;
 import com.google.android.material.color.MaterialColors;
@@ -41,7 +45,6 @@ import de.danoeh.antennapod.model.feed.FeedItem;
 import de.danoeh.antennapod.model.feed.FeedItemFilter;
 import de.danoeh.antennapod.model.feed.FeedMedia;
 import de.danoeh.antennapod.model.feed.SortOrder;
-import de.danoeh.antennapod.playback.service.PlaybackController;
 import de.danoeh.antennapod.playback.service.skip.SkipAudioClip;
 import de.danoeh.antennapod.playback.service.skip.SkipManager;
 import de.danoeh.antennapod.playback.service.skip.SkipMarker;
@@ -61,6 +64,7 @@ import io.reactivex.rxjava3.schedulers.Schedulers;
 public final class SampleEditorView extends LinearLayout {
     public static final String EXTRA_MARKER = "marker";
     private static final long CLIP_LOAD_DEBOUNCE_MS = 400;
+    private static final long MAX_WAVEFORM_WINDOW_MS = 90_000;
 
     private final long feedId;
     private final SkipRule rule;
@@ -79,17 +83,17 @@ public final class SampleEditorView extends LinearLayout {
     private final TextView status;
     private final EditText startLabel;
     private final EditText endLabel;
-    private final CheckBox loop;
+    private final MaterialButton loop;
     private final MaterialButton play;
     private final Button save;
     private final List<EpisodeInfo> episodes = new ArrayList<>();
     private final Handler previewHandler = new Handler(Looper.getMainLooper());
-    private final Handler inputHandler = new Handler(Looper.getMainLooper());
     private final Handler clipHandler = new Handler(Looper.getMainLooper());
     private final Runnable debouncedWaveformLoad = this::loadWaveform;
     private SkipTask waveformTask;
     private SkipTask sampleTask;
     private MediaPlayer mediaPlayer;
+    private MediaDataSource playbackDataSource;
     private SkipAudioClip clip;
     private Disposable clipTask;
     private EpisodeInfo episode;
@@ -98,9 +102,14 @@ public final class SampleEditorView extends LinearLayout {
     private long windowLength;
     private long selectionStart;
     private long selectionEnd;
+    private long playbackCursor;
     private boolean destroyed;
     private boolean waveformLoading;
     private boolean updatingInputs;
+    private boolean pendingInput;
+    private boolean pendingStartEdit;
+    private boolean playerPrepared;
+    private boolean keyboardVisible;
     private int fineStep = 100;
     private int clipGeneration;
     private int sampleGeneration;
@@ -135,7 +144,9 @@ public final class SampleEditorView extends LinearLayout {
             @Override
             public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
                 if (fromUser) {
-                    setWindowPosition(progress);
+                    if (commitPendingInput()) {
+                        seekCursor(progress, true);
+                    }
                 }
             }
 
@@ -155,9 +166,32 @@ public final class SampleEditorView extends LinearLayout {
         addFineButton(findViewById(R.id.audioSkipEndForwardAction), R.string.audio_skip_end_forward, 1, false);
         startLabel.addTextChangedListener(new SelectionTextWatcher(true));
         endLabel.addTextChangedListener(new SelectionTextWatcher(false));
+        setInputCommitListeners(startLabel);
+        setInputCommitListeners(endLabel);
+        ViewCompat.setOnApplyWindowInsetsListener(this, (view, insets) -> {
+            boolean visible = insets.isVisible(WindowInsetsCompat.Type.ime());
+            if (keyboardVisible && !visible) {
+                commitPendingInput();
+            }
+            keyboardVisible = visible;
+            return insets;
+        });
         addZoomButton(findViewById(R.id.audioSkipZoomOutAction), R.string.audio_skip_zoom_out, false);
         addZoomButton(findViewById(R.id.audioSkipZoomInAction), R.string.audio_skip_zoom_in, true);
         loop = findViewById(R.id.audioSkipLoopSample);
+        loop.setText(null);
+        loop.setIconResource(R.drawable.ic_audio_skip_loop);
+        loop.setIconPadding(0);
+        loop.setIconGravity(MaterialButton.ICON_GRAVITY_TEXT_TOP);
+        loop.setPadding(0, 0, 0, 0);
+        loop.setBackgroundTintList(new ColorStateList(
+                new int[][]{new int[]{android.R.attr.state_checked}, new int[]{}},
+                new int[]{MaterialColors.getColor(loop, R.attr.colorPrimary),
+                        MaterialColors.getColor(loop, R.attr.colorSecondaryContainer)}));
+        loop.setIconTint(new ColorStateList(
+                new int[][]{new int[]{android.R.attr.state_checked}, new int[]{}},
+                new int[]{MaterialColors.getColor(loop, R.attr.colorOnPrimary),
+                        MaterialColors.getColor(loop, R.attr.action_icon_color)}));
         play = findViewById(R.id.audioSkipPlaySample);
         play.setText(null);
         play.setIconResource(R.drawable.ic_play_24dp);
@@ -172,6 +206,10 @@ public final class SampleEditorView extends LinearLayout {
         stop.setIconGravity(MaterialButton.ICON_GRAVITY_TEXT_TOP);
         stop.setPadding(0, 0, 0, 0);
         stop.setOnClickListener(view -> stopPreview());
+        findViewById(R.id.audioSkipCursorBack).setOnClickListener(view -> seekCursorBy(-10_000));
+        findViewById(R.id.audioSkipCursorForward).setOnClickListener(view -> seekCursorBy(10_000));
+        findViewById(R.id.audioSkipCenterCursor).setOnClickListener(view -> centerCursor());
+        findViewById(R.id.audioSkipSetStart).setOnClickListener(view -> setStartFromCursor());
         Button cancel = findViewById(R.id.audioSkipCancelSample);
         cancel.setOnClickListener(view -> onCancel.run());
         save = findViewById(R.id.audioSkipSaveSample);
@@ -193,7 +231,6 @@ public final class SampleEditorView extends LinearLayout {
         }
         closeClip();
         previewHandler.removeCallbacksAndMessages(null);
-        inputHandler.removeCallbacksAndMessages(null);
         clipHandler.removeCallbacksAndMessages(null);
         super.onDetachedFromWindow();
     }
@@ -294,6 +331,7 @@ public final class SampleEditorView extends LinearLayout {
     }
 
     private void selectEpisode(EpisodeInfo value) {
+        stopPreview();
         cancelClipLoad();
         closeClip();
         episode = value;
@@ -304,35 +342,22 @@ public final class SampleEditorView extends LinearLayout {
             windowStart = Math.max(0, Math.min(position - 20_000, episodeDuration - windowLength));
             selectionStart = Math.max(windowStart, position - 5_000);
             selectionEnd = Math.min(episodeDuration, Math.max(selectionStart + 500, position));
+            playbackCursor = position;
         } else {
             windowStart = 0;
             selectionStart = windowStart;
             selectionEnd = Math.min(episodeDuration, selectionStart + Math.min(5_000, windowLength));
+            playbackCursor = selectionStart;
         }
         windowPosition.setMax((int) episodeDuration);
-        updateWindowPosition();
+        updateCursorProgress();
         waveformView.setRange(windowStart, windowStart + windowLength, selectionStart, selectionEnd);
         setSelectionInputs();
         scheduleWaveformLoad();
     }
 
-    private void setWindowPosition(long value) {
-        long selectionLength = selectionEnd - selectionStart;
-        windowStart = Math.max(0, Math.min(value - windowLength / 2,
-                Math.max(0, episodeDuration - windowLength)));
-        selectionStart = Math.max(0, Math.min(value - selectionLength / 2,
-                episodeDuration - selectionLength));
-        selectionEnd = selectionStart + selectionLength;
-        waveformView.setRange(windowStart, windowStart + windowLength, selectionStart, selectionEnd);
-        setSelectionInputs();
-        if (mediaPlayer != null) {
-            stopPreview();
-        }
-        scheduleWaveformLoad();
-    }
-
-    private void updateWindowPosition() {
-        windowPosition.setProgress((int) (windowStart + windowLength / 2));
+    private void updateCursorProgress() {
+        windowPosition.setProgress((int) playbackCursor);
     }
 
     private void loadWaveform() {
@@ -386,7 +411,6 @@ public final class SampleEditorView extends LinearLayout {
             waveformTask = null;
         }
         cancelSampleExtraction();
-        stopPreview();
         if (!isSelectionAvailable()) {
             closeClip();
         }
@@ -400,7 +424,6 @@ public final class SampleEditorView extends LinearLayout {
         if (clipTask != null) {
             clipTask.dispose();
         }
-        stopPreview();
         updateStreamControls();
         Uri sourceUri = episode.uri;
         long start = windowStart;
@@ -417,8 +440,8 @@ public final class SampleEditorView extends LinearLayout {
                         value = SkipAudioClip.create(getContext(), sourceUri, start, end);
                     } catch (IOException error) {
                         try {
-                            value = SkipAudioClip.create(getContext(), sourceUri, selectedStart, selectedEnd);
-                        } catch (IOException selectedError) {
+                            value = SkipAudioClip.create(getContext(), sourceUri, start, end, true);
+                        } catch (IOException windowError) {
                             post(() -> {
                                 if (!destroyed && generation == clipGeneration) {
                                     setStatus(R.string.audio_skip_audio_loading);
@@ -464,12 +487,10 @@ public final class SampleEditorView extends LinearLayout {
                         return;
                     }
                     cancelSampleExtraction();
-                    stopPreview();
                     closeClip();
                     clip = value;
                     windowStart = value.startMs;
                     windowLength = value.endMs - value.startMs;
-                    updateWindowPosition();
                     waveformView.setRange(windowStart, windowStart + windowLength, selectionStart, selectionEnd);
                     updateStreamControls();
                     if (!play.isEnabled()) {
@@ -486,7 +507,6 @@ public final class SampleEditorView extends LinearLayout {
                         if (isSelectionAvailable()) {
                             windowStart = clip.startMs;
                             windowLength = clip.endMs - clip.startMs;
-                            updateWindowPosition();
                             waveformView.setRange(windowStart, windowStart + windowLength,
                                     selectionStart, selectionEnd);
                             extractWaveform(clip.uri, 0, windowLength);
@@ -556,7 +576,7 @@ public final class SampleEditorView extends LinearLayout {
         value.setMinimumWidth(0);
         value.setContentDescription(getContext().getString(title));
         value.setOnClickListener(view -> {
-            if (!syncSelectionFromInputs()) {
+            if (!commitPendingInput()) {
                 return;
             }
             long delta = direction * fineStep;
@@ -583,18 +603,18 @@ public final class SampleEditorView extends LinearLayout {
         value.setText(title);
         value.setContentDescription(getContext().getString(title));
         value.setOnClickListener(view -> {
-            if (!syncSelectionFromInputs()) {
+            if (!commitPendingInput()) {
                 return;
             }
             long selectionLength = selectionEnd - selectionStart;
             long center = selectionStart + selectionLength / 2;
             windowLength = Math.max(selectionLength,
-                    Math.max(1_000, Math.min(30_000, in ? windowLength / 2 : windowLength * 2)));
+                    Math.max(1_000, Math.min(MAX_WAVEFORM_WINDOW_MS,
+                            in ? windowLength / 2 : windowLength * 2)));
             windowLength = Math.min(windowLength, episodeDuration);
             windowStart = Math.max(0, Math.min(center - windowLength / 2,
                     episodeDuration - windowLength));
             windowPosition.setMax((int) episodeDuration);
-            updateWindowPosition();
             updateSelection();
             scheduleWaveformLoad();
         });
@@ -612,6 +632,7 @@ public final class SampleEditorView extends LinearLayout {
     }
 
     private void setSelectionInputs() {
+        pendingInput = false;
         updatingInputs = true;
         startLabel.setText(AudioSkipRulesActivity.formatTime(selectionStart));
         endLabel.setText(AudioSkipRulesActivity.formatTime(selectionEnd));
@@ -625,11 +646,10 @@ public final class SampleEditorView extends LinearLayout {
         }
         if (reloadWaveform) {
             windowLength = Math.max(windowLength, selectionEnd - selectionStart);
-            windowLength = Math.min(30_000, Math.min(windowLength, episodeDuration));
+            windowLength = Math.min(MAX_WAVEFORM_WINDOW_MS, Math.min(windowLength, episodeDuration));
             windowStart = Math.max(0, Math.min(selectionStart - (windowLength - selectionEnd + selectionStart) / 2,
                     episodeDuration - windowLength));
             windowPosition.setMax((int) episodeDuration);
-            updateWindowPosition();
         }
         waveformView.setRange(windowStart, windowStart + windowLength, selectionStart, selectionEnd);
         updateStreamControls();
@@ -646,7 +666,7 @@ public final class SampleEditorView extends LinearLayout {
             return;
         }
         boolean available = isSelectionAvailable();
-        play.setEnabled(available);
+        play.setEnabled(SkipStreamingSource.isAvailable(episode.uri));
         save.setEnabled(available);
     }
 
@@ -663,7 +683,7 @@ public final class SampleEditorView extends LinearLayout {
     }
 
     private void saveSample() {
-        if (!syncSelectionFromInputs()) {
+        if (!commitPendingInput()) {
             return;
         }
         if (episode == null || selectionEnd - selectionStart < 500 || selectionEnd - selectionStart > 30_000) {
@@ -715,7 +735,7 @@ public final class SampleEditorView extends LinearLayout {
     }
 
     private void playPreview() {
-        if (!syncSelectionFromInputs()) {
+        if (!commitPendingInput()) {
             return;
         }
         if (episode == null) {
@@ -723,40 +743,40 @@ public final class SampleEditorView extends LinearLayout {
             return;
         }
         stopPreview();
-        PlaybackController.bindToMedia3Service(getContext(), controller -> controller.pause());
         try {
-            Uri previewUri = episode.uri;
-            long previewStart = selectionStart;
-            long previewEnd = selectionEnd;
             if (SkipStreamingSource.isStreaming(episode.uri)) {
-                if (clip == null || selectionStart < clip.startMs || selectionEnd > clip.endMs) {
-                    setStatus(R.string.audio_skip_stream_sample_unavailable);
-                    return;
-                }
-                previewUri = clip.uri;
-                previewStart -= clip.startMs;
-                previewEnd -= clip.startMs;
+                playbackDataSource = SkipStreamingSource.openForPlayback(episode.uri);
             }
             mediaPlayer = new MediaPlayer();
-            mediaPlayer.setDataSource(getContext(), previewUri);
-            final long start = previewStart;
-            final long end = previewEnd;
+            if (playbackDataSource == null) {
+                mediaPlayer.setDataSource(getContext(), episode.uri);
+            } else {
+                mediaPlayer.setDataSource(playbackDataSource);
+            }
             mediaPlayer.setOnPreparedListener(player -> {
                 if (destroyed) {
                     stopPreview();
                     return;
                 }
+                playerPrepared = true;
+                long start = loop.isChecked() ? selectionStart : playbackCursor;
                 player.seekTo((int) start);
+                playbackCursor = start;
+                updateCursorDisplay();
                 player.start();
-                schedulePreviewStop(start, end);
+                scheduleCursorUpdate();
             });
             mediaPlayer.setOnCompletionListener(player -> {
                 if (loop.isChecked() && !destroyed) {
-                    player.seekTo((int) start);
+                    playbackCursor = selectionStart;
+                    player.seekTo((int) selectionStart);
                     player.start();
-                } else {
-                    stopPreview();
+                    scheduleCursorUpdate();
+                    return;
                 }
+                playbackCursor = episodeDuration;
+                updateCursorDisplay();
+                releasePreview();
             });
             mediaPlayer.setOnErrorListener((player, what, extra) -> {
                 stopPreview();
@@ -771,59 +791,103 @@ public final class SampleEditorView extends LinearLayout {
 
     private void stopPreview() {
         previewHandler.removeCallbacksAndMessages(null);
-        if (mediaPlayer != null) {
+        MediaDataSource dataSource = playbackDataSource;
+        playbackDataSource = null;
+        if (dataSource != null) {
             try {
-                mediaPlayer.stop();
-            } catch (IllegalStateException ignored) {
+                dataSource.close();
+            } catch (IOException ignored) {
             }
-            try {
-                mediaPlayer.reset();
-            } catch (IllegalStateException ignored) {
-            }
-            try {
-                mediaPlayer.release();
-            } catch (IllegalStateException ignored) {
-            }
-            mediaPlayer = null;
         }
+        MediaPlayer player = mediaPlayer;
+        mediaPlayer = null;
+        if (player != null) {
+            if (playerPrepared) {
+                playbackCursor = Math.max(0, Math.min(episodeDuration, player.getCurrentPosition()));
+            }
+            try {
+                player.stop();
+            } catch (IllegalStateException ignored) {
+            }
+            try {
+                player.reset();
+            } catch (IllegalStateException ignored) {
+            }
+            try {
+                player.release();
+            } catch (IllegalStateException ignored) {
+            }
+        }
+        playerPrepared = false;
+        updateCursorDisplay();
     }
 
-    private void schedulePreviewStop(long start, long end) {
+    private void releasePreview() {
+        playerPrepared = false;
+        stopPreview();
+    }
+
+    private void scheduleCursorUpdate() {
         previewHandler.postDelayed(() -> {
-            if (mediaPlayer == null || destroyed) {
+            if (mediaPlayer == null || !playerPrepared || destroyed) {
                 return;
             }
-            if (mediaPlayer.getCurrentPosition() < end) {
-                schedulePreviewStop(start, end);
-                return;
-            }
-            if (loop.isChecked()) {
-                mediaPlayer.seekTo((int) start);
+            playbackCursor = mediaPlayer.getCurrentPosition();
+            if (loop.isChecked() && playbackCursor >= selectionEnd) {
+                playbackCursor = selectionStart;
+                mediaPlayer.seekTo((int) selectionStart);
                 mediaPlayer.start();
-                schedulePreviewStop(start, end);
-            } else {
-                stopPreview();
             }
-        }, 100);
+            updateCursorDisplay();
+            scheduleCursorUpdate();
+        }, 50);
     }
 
-    private boolean syncSelectionFromInputs() {
-        inputHandler.removeCallbacksAndMessages(null);
+    private boolean commitPendingInput() {
+        if (!pendingInput) {
+            return true;
+        }
         long start = AudioSkipRulesActivity.parseDuration(startLabel.getText().toString());
         long end = AudioSkipRulesActivity.parseDuration(endLabel.getText().toString());
+        if (pendingStartEdit && start >= 0 && start <= episodeDuration && (end <= start
+                || end - start < 500 || end - start > 30_000)) {
+            long duration = selectionEnd - selectionStart;
+            if (start + 500 <= episodeDuration) {
+                end = Math.min(episodeDuration, start + duration);
+            }
+        }
         if (start < 0 || end <= start || end - start < 500 || end - start > 30_000
                 || episode == null || end > episodeDuration) {
-            if (episode != null && SkipStreamingSource.isStreaming(episode.uri)) {
-                play.setEnabled(false);
-                save.setEnabled(false);
-            }
+            updateCursorProgress();
             setStatus(R.string.audio_skip_validation_timestamp);
             return false;
         }
+        long previousStart = selectionStart;
+        long previousEnd = selectionEnd;
         selectionStart = start;
         selectionEnd = end;
+        pendingInput = false;
+        setSelectionInputs();
+        if (selectionStart != previousStart || selectionEnd != previousEnd) {
+            cancelSampleExtraction();
+        }
         updateWindowForSelection();
         return true;
+    }
+
+    private void setInputCommitListeners(EditText input) {
+        input.setOnEditorActionListener((view, actionId, event) -> {
+            if (actionId == EditorInfo.IME_ACTION_DONE) {
+                commitPendingInput();
+                return true;
+            }
+            return false;
+        });
+        input.setOnFocusChangeListener((view, hasFocus) -> {
+            if (!hasFocus) {
+                commitPendingInput();
+            }
+        });
     }
 
     private final class SelectionTextWatcher implements TextWatcher {
@@ -846,51 +910,70 @@ public final class SampleEditorView extends LinearLayout {
             if (updatingInputs || episode == null) {
                 return;
             }
-            inputHandler.removeCallbacksAndMessages(null);
-            if (value.toString().trim().isEmpty()) {
-                if (SkipStreamingSource.isStreaming(episode.uri)) {
-                    cancelClipLoad();
-                }
-                return;
-            }
-            if (SkipStreamingSource.isStreaming(episode.uri)) {
-                cancelClipLoad();
-            }
-            inputHandler.postDelayed(() -> updateSelectionFromInputs(start), 300);
+            cancelSampleExtraction();
+            pendingInput = true;
+            pendingStartEdit = start;
         }
     }
 
-    private void updateSelectionFromInputs(boolean editedStart) {
-        long previousStart = selectionStart;
-        long previousEnd = selectionEnd;
-        long start = AudioSkipRulesActivity.parseDuration(startLabel.getText().toString());
-        long end = AudioSkipRulesActivity.parseDuration(endLabel.getText().toString());
-        if (start < 0 || end < 0 || start > episodeDuration || end > episodeDuration) {
-            return;
+    private void seekCursorBy(long delta) {
+        if (commitPendingInput()) {
+            seekCursor(playbackCursor + delta, true);
         }
-        if (end - start >= 500 && end - start <= 30_000) {
-            selectionStart = start;
-            selectionEnd = end;
-        } else if (editedStart) {
-            long duration = selectionEnd - selectionStart;
-            if (start + 500 > episodeDuration) {
-                return;
-            }
-            selectionStart = start;
-            selectionEnd = Math.min(episodeDuration, start + duration);
-            setSelectionInputs();
+    }
+
+    private void seekCursor(long position, boolean keepVisible) {
+        playbackCursor = Math.max(0, Math.min(episodeDuration, position));
+        if (mediaPlayer != null && playerPrepared) {
+            mediaPlayer.seekTo((int) playbackCursor);
+        }
+        if (keepVisible && (playbackCursor < windowStart || playbackCursor > windowStart + windowLength)) {
+            centerCursorWindow();
         } else {
+            updateCursorDisplay();
+        }
+    }
+
+    private void centerCursor() {
+        if (commitPendingInput()) {
+            centerCursorWindow();
+        }
+    }
+
+    private void centerCursorWindow() {
+        windowStart = Math.max(0, Math.min(playbackCursor - windowLength / 2,
+                Math.max(0, episodeDuration - windowLength)));
+        waveformView.setRange(windowStart, windowStart + windowLength, selectionStart, selectionEnd);
+        scheduleWaveformLoad();
+        updateCursorDisplay();
+    }
+
+    private void setStartFromCursor() {
+        if (!commitPendingInput() || episode == null) {
             return;
         }
-        if (mediaPlayer != null && (selectionStart != previousStart || selectionEnd != previousEnd)) {
-            stopPreview();
-        }
-        if (selectionStart != previousStart || selectionEnd != previousEnd) {
-            cancelSampleExtraction();
-        }
+        long duration = Math.max(500, Math.min(30_000, selectionEnd - selectionStart));
+        selectionStart = Math.max(0, Math.min(playbackCursor, episodeDuration - duration));
+        selectionEnd = selectionStart + duration;
+        cancelSampleExtraction();
+        setSelectionInputs();
         updateWindowForSelection();
-        if (SkipStreamingSource.isStreaming(episode.uri) && isSelectionAvailable()) {
-            scheduleWaveformLoad();
+    }
+
+    private void updateCursorDisplay() {
+        updateCursorProgress();
+        waveformView.invalidate();
+    }
+
+    void stopPlayback() {
+        stopPreview();
+    }
+
+    @Override
+    protected void onWindowVisibilityChanged(int visibility) {
+        super.onWindowVisibilityChanged(visibility);
+        if (visibility != VISIBLE && !destroyed) {
+            stopPreview();
         }
     }
 
@@ -967,6 +1050,7 @@ public final class SampleEditorView extends LinearLayout {
         private final Paint waveformPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint selectionPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint handlePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint cursorPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private SkipWaveform waveform;
         private long rangeStart;
         private long rangeEnd;
@@ -981,6 +1065,8 @@ public final class SampleEditorView extends LinearLayout {
             waveformPaint.setColor(MaterialColors.getColor(this, R.attr.colorOnSurfaceVariant));
             selectionPaint.setColor(MaterialColors.getColor(this, R.attr.colorPrimaryContainer));
             handlePaint.setColor(MaterialColors.getColor(this, R.attr.colorPrimary));
+            cursorPaint.setColor(MaterialColors.getColor(this, R.attr.colorError));
+            cursorPaint.setStrokeWidth(dp(2));
         }
 
         void setWaveform(SkipWaveform waveform) {
@@ -1015,11 +1101,18 @@ public final class SampleEditorView extends LinearLayout {
             }
             canvas.drawRect(left - 3, 0, left + 3, height, handlePaint);
             canvas.drawRect(right - 3, 0, right + 3, height, handlePaint);
+            float cursorX = xFor(playbackCursor);
+            if (cursorX >= 0 && cursorX <= width) {
+                canvas.drawLine(cursorX, 0, cursorX, height, cursorPaint);
+            }
         }
 
         @Override
         public boolean onTouchEvent(MotionEvent event) {
             if (rangeEnd <= rangeStart) {
+                return true;
+            }
+            if (event.getAction() == MotionEvent.ACTION_DOWN && !commitPendingInput()) {
                 return true;
             }
             float x = Math.max(0, Math.min(getWidth(), event.getX()));
@@ -1053,7 +1146,6 @@ public final class SampleEditorView extends LinearLayout {
                     windowStart = Math.max(0, Math.min(windowStart - delta,
                             episodeDuration - windowLength));
                     lastX = event.getX();
-                    updateWindowPosition();
                     waveform = null;
                 }
                 if (handle != 3) {

@@ -51,11 +51,111 @@
         android:layout_marginTop="4dp"
         android:gravity="center_vertical"
         android:orientation="horizontal">
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/audioSkipCursorBack"
+            style="@style/Widget.Material3.Button.TextButton"
+            android:layout_width="48dp"
+            android:layout_height="wrap_content"
+            android:contentDescription="@string/audio_skip_rewind_10"
+            android:text="@string/audio_skip_seek_ten_seconds"
+            android:textSize="11sp"
+            app:icon="@drawable/ic_fast_rewind"
+            app:iconGravity="textTop"
+            app:iconPadding="0dp" />
+
         <SeekBar
             android:id="@+id/audioSkipWindowPosition"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/audioSkipCursorForward"
+            style="@style/Widget.Material3.Button.TextButton"
+            android:layout_width="48dp"
+            android:layout_height="wrap_content"
+            android:contentDescription="@string/audio_skip_forward_10"
+            android:text="@string/audio_skip_seek_ten_seconds"
+            android:textSize="11sp"
+            app:icon="@drawable/ic_fast_forward"
+            app:iconGravity="textTop"
+            app:iconPadding="0dp" />
+
+    </LinearLayout>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center"
+        android:orientation="horizontal">
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/audioSkipCenterCursor"
+            style="@style/Widget.Material3.Button.TextButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:contentDescription="@string/audio_skip_center_cursor"
+            android:text="@string/audio_skip_center_cursor"
+            app:icon="@drawable/ic_refresh"
+            app:iconGravity="textStart" />
+
+    </LinearLayout>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center"
+        android:orientation="horizontal">
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/audioSkipLoopSample"
+            style="@style/Widget.Material3.Button.TonalButton"
+            android:layout_width="48dp"
+            android:minWidth="48dp"
+            android:layout_height="wrap_content"
+            android:minHeight="48dp"
+            android:layout_marginHorizontal="4dp"
+            android:contentDescription="@string/audio_skip_loop_sample"
+            android:checkable="true"
+            android:padding="0dp"
+            app:cornerRadius="24dp"
+            app:icon="@drawable/ic_audio_skip_loop"
+            app:iconGravity="textTop"
+            app:iconPadding="0dp" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/audioSkipPlaySample"
+            style="@style/Widget.Material3.Button.TonalButton"
+            android:layout_width="48dp"
+            android:minWidth="48dp"
+            android:layout_height="wrap_content"
+            android:minHeight="48dp"
+            android:layout_marginHorizontal="4dp"
+            android:contentDescription="@string/audio_skip_play_sample"
+            android:padding="0dp"
+            app:cornerRadius="24dp"
+            app:iconGravity="textTop" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/audioSkipStopPreview"
+            style="@style/Widget.Material3.Button.TonalButton"
+            android:layout_width="48dp"
+            android:minWidth="48dp"
+            android:layout_height="wrap_content"
+            android:layout_marginHorizontal="4dp"
+            android:minHeight="48dp"
+            android:contentDescription="@string/audio_skip_stop_preview"
+            android:padding="0dp"
+            app:cornerRadius="24dp"
+            app:iconGravity="textTop" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/audioSkipSetStart"
+            style="@style/Widget.Material3.Button.TextButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:contentDescription="@string/audio_skip_set_start"
+            android:text="@string/audio_skip_set_start" />
 
     </LinearLayout>
 
@@ -70,26 +170,6 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:orientation="horizontal" />
-
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/audioSkipPlaySample"
-            style="@style/Widget.Material3.Button.TonalButton"
-            android:layout_width="48dp"
-            android:layout_height="wrap_content"
-            android:layout_marginHorizontal="4dp"
-            android:contentDescription="@string/audio_skip_play_sample"
-            app:cornerRadius="24dp"
-            app:iconGravity="textTop" />
-
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/audioSkipStopPreview"
-            style="@style/Widget.Material3.Button.TonalButton"
-            android:layout_width="48dp"
-            android:layout_height="wrap_content"
-            android:layout_marginHorizontal="4dp"
-            android:contentDescription="@string/audio_skip_stop_preview"
-            app:cornerRadius="24dp"
-            app:iconGravity="textTop" />
 
         <LinearLayout
             android:id="@+id/audioSkipZoomInAction"
@@ -140,6 +220,7 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:inputType="text"
+                    android:imeOptions="actionDone"
                     android:singleLine="true" />
 
             </com.google.android.material.textfield.TextInputLayout>
@@ -179,6 +260,7 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:inputType="text"
+                    android:imeOptions="actionDone"
                     android:singleLine="true" />
 
             </com.google.android.material.textfield.TextInputLayout>
@@ -192,13 +274,6 @@
         </LinearLayout>
 
     </LinearLayout>
-
-    <CheckBox
-        android:id="@+id/audioSkipLoopSample"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
-        android:text="@string/audio_skip_loop_sample" />
 
     <LinearLayout
         android:layout_width="match_parent"

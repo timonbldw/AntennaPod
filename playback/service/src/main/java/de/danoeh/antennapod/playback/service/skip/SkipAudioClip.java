@@ -10,7 +10,7 @@ import java.io.IOException;
 import java.io.OutputStream;
 
 public final class SkipAudioClip implements AutoCloseable {
-    private static final long MAX_DURATION_MS = 30_000;
+    private static final long MAX_DURATION_MS = 90_000;
     public final Uri uri;
     public final long startMs;
     public final long endMs;
