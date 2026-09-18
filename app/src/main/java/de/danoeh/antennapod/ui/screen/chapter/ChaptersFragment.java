@@ -222,7 +222,10 @@ public class ChaptersFragment extends AppCompatDialogFragment {
         skipAnalysisRows.removeAllViews();
         String status;
         if (snapshot.status == SkipAnalysisStatus.ANALYZING) {
-            status = getString(R.string.audio_skip_playback_analyzing);
+            status = snapshot.occurrences.isEmpty()
+                    ? getString(R.string.audio_skip_playback_analyzing)
+                    : getString(R.string.audio_skip_playback_analyzing_with_skips,
+                    snapshot.occurrences.size());
         } else if (snapshot.status == SkipAnalysisStatus.WAITING_FOR_AUDIO) {
             status = snapshot.occurrences.isEmpty()
                     ? getString(R.string.audio_skip_playback_waiting_for_audio)
