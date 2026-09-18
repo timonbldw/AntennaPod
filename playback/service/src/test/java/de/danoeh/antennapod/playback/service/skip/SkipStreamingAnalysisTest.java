@@ -11,12 +11,14 @@ import org.robolectric.annotation.Config;
 import org.robolectric.annotation.Implementation;
 import org.robolectric.annotation.Implements;
 
+import java.io.IOException;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Random;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.Assert.assertEquals;
@@ -37,6 +39,7 @@ public class SkipStreamingAnalysisTest {
         feedId = UUID.randomUUID().toString();
         manager.saveRule(feedId, fixedRule());
         AudioDecoderShadow.unavailable = false;
+        AudioDecoderShadow.incompleteAudio = false;
         AudioDecoderShadow.audio = null;
         AudioDecoderShadow.calls = 0;
         AudioDecoderShadow.fetchMissing = false;
@@ -73,6 +76,33 @@ public class SkipStreamingAnalysisTest {
     }
 
     @Test
+    public void incompleteDecoderWindowRetainsJobAndRetriesOnPositionPoll() throws Exception {
+        Uri source = Uri.parse("skip-cache://incomplete-window");
+        AudioDecoderShadow.incompleteAudio = true;
+        CountDownLatch waiting = new CountDownLatch(1);
+        CountDownLatch ready = new CountDownLatch(1);
+        AtomicReference<SkipAnalysisSnapshot> result = new AtomicReference<>();
+        try (SkipSubscription subscription = manager.observe(feedId, "incomplete-window", snapshot -> {
+            result.set(snapshot);
+            if (snapshot.status == SkipAnalysisStatus.WAITING_FOR_AUDIO) {
+                waiting.countDown();
+            } else if (snapshot.status == SkipAnalysisStatus.WINDOW_READY) {
+                ready.countDown();
+            }
+        })) {
+            SkipTask task = manager.analyze(feedId, "incomplete-window", source, 180_000, 20_000,
+                    SkipPriority.CURRENT_PLAYBACK);
+            assertTrue(waiting.await(5, TimeUnit.SECONDS));
+            assertFalse(task.isDone());
+            AudioDecoderShadow.incompleteAudio = false;
+            assertTrue(manager.updateStreamingPosition(feedId, "incomplete-window", 20_000, 1));
+            assertTrue(ready.await(5, TimeUnit.SECONDS));
+            assertFalse(task.isDone());
+            assertEquals(SkipAnalysisStatus.WINDOW_READY, result.get().status);
+        }
+    }
+
+    @Test
     public void seekWakesCoveredWindowForNewVicinity() throws Exception {
         Uri source = Uri.parse("skip-cache://seek");
         CountDownLatch firstReady = new CountDownLatch(1);
@@ -93,6 +123,43 @@ public class SkipStreamingAnalysisTest {
             assertTrue(manager.updateStreamingPosition(feedId, "episode", 120_000, 2));
             assertTrue(secondReady.await(5, TimeUnit.SECONDS));
             assertTrue(result.get().coverage.get(result.get().coverage.size() - 1).endMs >= 120_000);
+        }
+    }
+
+    @Test
+    public void searchedCoverageSurvivesCancelledStreamingJob() throws Exception {
+        Uri source = Uri.parse("skip-cache://persisted-coverage");
+        String episodeId = "persisted-coverage";
+        CountDownLatch firstReady = new CountDownLatch(1);
+        CountDownLatch restartedReady = new CountDownLatch(1);
+        AtomicBoolean restarting = new AtomicBoolean();
+        AtomicReference<SkipAnalysisSnapshot> restartedSnapshot = new AtomicReference<>();
+        try (SkipSubscription subscription = manager.observe(feedId, episodeId, snapshot -> {
+            if (snapshot.status != SkipAnalysisStatus.WINDOW_READY) {
+                return;
+            } else if (restarting.get()) {
+                restartedSnapshot.set(snapshot);
+                restartedReady.countDown();
+            } else {
+                firstReady.countDown();
+            }
+        })) {
+            SkipTask first = manager.analyze(feedId, episodeId, source, 180_000, 20_000,
+                    SkipPriority.CURRENT_PLAYBACK);
+            assertTrue(firstReady.await(5, TimeUnit.SECONDS));
+            assertFalse(first.isDone());
+            int calls = AudioDecoderShadow.calls;
+            restarting.set(true);
+            first.cancel();
+            assertTrue(first.isCancelled());
+            SkipTask restarted = manager.analyze(feedId, episodeId, source, 180_000, 20_000,
+                    SkipPriority.CURRENT_PLAYBACK);
+            assertTrue(restartedReady.await(5, TimeUnit.SECONDS));
+            assertFalse(restarted.isDone());
+            assertEquals(1, restartedSnapshot.get().coverage.size());
+            assertEquals(9_984, restartedSnapshot.get().coverage.get(0).startMs, 32);
+            assertEquals(50_000, restartedSnapshot.get().coverage.get(0).endMs, 32);
+            assertEquals(calls, AudioDecoderShadow.calls);
         }
     }
 
@@ -290,6 +357,7 @@ public class SkipStreamingAnalysisTest {
     @Implements(SkipAudioDecoder.class)
     public static class AudioDecoderShadow {
         private static volatile boolean unavailable;
+        private static volatile boolean incompleteAudio;
         private static volatile float[] audio;
         private static volatile int calls;
         private static volatile boolean fetchMissing;
@@ -297,15 +365,19 @@ public class SkipStreamingAnalysisTest {
 
         @Implementation
         protected static SkipAudioDecoder.DecodedAudio decode(Context context, Uri uri, long startMs, long endMs)
-                throws SkipStreamingSource.UnavailableException {
+                throws IOException {
             return decode(context, uri, startMs, endMs, false);
         }
 
         @Implementation
         protected static SkipAudioDecoder.DecodedAudio decode(Context context, Uri uri, long startMs, long endMs,
                                                                boolean shouldFetchMissing)
-                throws SkipStreamingSource.UnavailableException {
+                throws IOException {
             fetchMissing = shouldFetchMissing;
+            if (incompleteAudio) {
+                return new SkipAudioDecoder.DecodedAudio(startMs,
+                        new float[(int) (endMs - startMs) * 8], endMs - startMs - 1, false);
+            }
             if (unavailable) {
                 throw new SkipStreamingSource.UnavailableException("cache miss");
             }

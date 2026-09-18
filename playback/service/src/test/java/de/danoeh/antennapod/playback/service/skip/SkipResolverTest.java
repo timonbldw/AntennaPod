@@ -131,6 +131,26 @@ public class SkipResolverTest {
     }
 
     @Test
+    public void markerDiscoveryOrderDoesNotAffectChronologicalPairing() {
+        SkipRule rule = rule(SkipRule.Type.BETWEEN, 0, 40_000, 0, 0, 0);
+        List<SkipMarkerHit> hits = Arrays.asList(end(20_000), start(5_000));
+        List<SkipOccurrence> result = resolve(rule, hits, COMPLETE);
+        assertEquals(1, result.size());
+        assertEquals(5_000, result.get(0).startMs);
+        assertEquals(22_000, result.get(0).endMs);
+    }
+
+    @Test
+    public void sharedMarkerDiscoveryOrderReconcilesEarlierStart() {
+        SkipRule rule = rule(SkipRule.Type.BETWEEN, 0, 40_000, 0, 0, 0).withUseStartAsEnd(true);
+        List<SkipMarkerHit> hits = Arrays.asList(start(20_000), start(5_000));
+        List<SkipOccurrence> result = resolve(rule, hits, COMPLETE);
+        assertEquals(1, result.size());
+        assertEquals(5_000, result.get(0).startMs);
+        assertEquals(22_000, result.get(0).endMs);
+    }
+
+    @Test
     public void sharedStartSamplesPairSuccessiveOccurrencesAndIgnoreStoredEnds() {
         SkipRule rule = rule(SkipRule.Type.BETWEEN, 0, 40_000, 0, 0, 0).withUseStartAsEnd(true);
         List<SkipMarkerHit> hits = Arrays.asList(start(5_000), end(10_000), start(20_000),
