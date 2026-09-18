@@ -103,6 +103,15 @@ public final class SkipStreamingSource {
     }
 
     static CachedMediaDataSource open(Uri syntheticUri, boolean fetchMissing) throws UnavailableException {
+        return open(syntheticUri, fetchMissing, MAX_FETCH_BYTES);
+    }
+
+    public static MediaDataSource openForPlayback(Uri syntheticUri) throws UnavailableException {
+        return open(syntheticUri, true, Long.MAX_VALUE);
+    }
+
+    private static CachedMediaDataSource open(Uri syntheticUri, boolean fetchMissing, long fetchBudget)
+            throws UnavailableException {
         Source source;
         synchronized (LOCK) {
             source = SYNTHETIC_SOURCES.get(syntheticUri);
@@ -122,7 +131,7 @@ public final class SkipStreamingSource {
         if (fetchMissing && source.upstreamFactory == null) {
             throw new UnavailableException("Streaming source cannot fetch audio bytes");
         }
-        return new CachedMediaDataSource(source, size, fetchMissing, Thread.currentThread());
+        return new CachedMediaDataSource(source, size, fetchMissing, fetchBudget, Thread.currentThread());
     }
 
     public static final class Registration {
@@ -149,6 +158,7 @@ public final class SkipStreamingSource {
         private final Source source;
         private final long size;
         private final boolean fetchMissing;
+        private final long fetchBudget;
         private final Thread requestingThread;
         private volatile UnavailableException failure;
         private volatile boolean failureIsTailCacheMiss;
@@ -162,11 +172,12 @@ public final class SkipStreamingSource {
         private long fetchedBytes;
         private volatile boolean closed;
 
-        private CachedMediaDataSource(Source source, long size, boolean fetchMissing,
+        private CachedMediaDataSource(Source source, long size, boolean fetchMissing, long fetchBudget,
                                       Thread requestingThread) {
             this.source = source;
             this.size = size;
             this.fetchMissing = fetchMissing;
+            this.fetchBudget = fetchBudget;
             this.requestingThread = requestingThread;
         }
 
@@ -259,7 +270,7 @@ public final class SkipStreamingSource {
         }
 
         private int fetchSpan(long position, byte[] buffer, int offset, int readSize) throws IOException {
-            if (fetchedBytes >= MAX_FETCH_BYTES) {
+            if (fetchedBytes >= fetchBudget) {
                 throw unavailable("Audio clip fetch limit exceeded", null);
             }
             long cachedLength;
@@ -275,9 +286,9 @@ public final class SkipStreamingSource {
                 throw unavailable("Requested audio bytes are unavailable", null);
             }
             int fetchSize = (int) Math.min(Math.min(Math.max(readSize, MIN_FETCH_SIZE),
-                    Math.min(-cachedLength, size - position)), MAX_FETCH_BYTES - fetchedBytes);
+                    Math.min(-cachedLength, size - position)), fetchBudget - fetchedBytes);
             BoundedUpstreamDataSource upstream = new BoundedUpstreamDataSource(
-                    source.upstreamFactory.createDataSource(), MAX_FETCH_BYTES - fetchedBytes);
+                    source.upstreamFactory.createDataSource(), fetchBudget - fetchedBytes);
             CacheDataSource dataSource = new CacheDataSource.Factory()
                     .setCache(source.cache)
                     .setCacheKeyFactory(dataSpec -> source.cacheKey)

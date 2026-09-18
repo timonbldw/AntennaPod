@@ -1163,7 +1163,7 @@
     <string name="audio_skip_sample_editor">Audio sample</string>
     <string name="audio_skip_source_episode">Episode</string>
     <string name="audio_skip_no_downloaded_episodes">Download an episode from this podcast to create a sample.</string>
-    <string name="audio_skip_window_position">Audio position</string>
+    <string name="audio_skip_window_position">Playback position</string>
     <string name="audio_skip_sample_start_time">Sample start</string>
     <string name="audio_skip_sample_end_time">Sample end</string>
     <string name="audio_skip_timestamp_hint">00:00.000 or 0:00:00.000</string>
@@ -1177,9 +1177,14 @@
     <string name="audio_skip_start_forward">Start forward</string>
     <string name="audio_skip_end_back">End back</string>
     <string name="audio_skip_end_forward">End forward</string>
-    <string name="audio_skip_play_sample">Play sample</string>
+    <string name="audio_skip_play_sample">Play</string>
     <string name="audio_skip_loop_sample">Loop sample</string>
     <string name="audio_skip_stop_preview">Stop</string>
+    <string name="audio_skip_seek_ten_seconds">10</string>
+    <string name="audio_skip_rewind_10">Rewind 10 seconds</string>
+    <string name="audio_skip_forward_10">Forward 10 seconds</string>
+    <string name="audio_skip_center_cursor">Center playback cursor</string>
+    <string name="audio_skip_set_start">Set start</string>
     <string name="audio_skip_test_rule">Test rule</string>
     <string name="audio_skip_test_analyzing">Analyzing selected episode...</string>
     <string name="audio_skip_test_analyzing_from">Reading audio from %s...</string>
