@@ -409,14 +409,8 @@ public final class SkipManager {
                             : chooseWindowStart(positionMs, coverageEnd, coverage);
                     startMs -= startMs % SkipFingerprint.HOP_MS;
                     analyzeWindow(startMs, Math.min(coverageEnd, startMs + WINDOW_MS));
+                    checkpoint();
                     checkCancelled();
-                    if (callback == null && reusableSource(audioUri)) {
-                        try {
-                            analysisCache.write(feedId, episodeId,
-                                    new SkipAnalysisCache.Entry(identity, revision, durationMs, coverage, hits));
-                        } catch (IOException ignored) {
-                        }
-                    }
                 }
                 boolean done = rules.isEmpty() || isCoveredFrom(coverage, coverageStart, coverageEnd);
                 Resolution resolution = resolveAll(rules, hits, durationMs, coverage);
@@ -478,7 +472,7 @@ public final class SkipManager {
                 rules = enabledRules;
                 streamingUnsupported &= hasEnabledRules && rules.isEmpty();
             }
-            if (callback == null && reusableSource(audioUri)) {
+            if (callback == null && cacheableSource(audioUri)) {
                 try {
                     SkipAnalysisCache.Entry cached = analysisCache.read(feedId, episodeId);
                     if (cached != null && identity.equals(cached.sourceIdentity)
@@ -550,6 +544,10 @@ public final class SkipManager {
                 throw new IOException("Audio source changed during decoding");
             }
             if (!decoded.complete || decoded.startMs > startMs) {
+                if (SkipStreamingSource.isStreaming(audioUri)) {
+                    throw new SkipStreamingSource.UnavailableException(
+                            "Audio window has incomplete decoder coverage");
+                }
                 throw new IOException("Audio window has incomplete decoder coverage");
             }
             long actualEnd = decoded.startMs + decoded.durationMs;
@@ -572,6 +570,9 @@ public final class SkipManager {
                 safeEnd = Math.min(endMs, durationMs);
             }
             if (safeEnd <= startMs) {
+                if (SkipStreamingSource.isStreaming(audioUri)) {
+                    throw new SkipStreamingSource.UnavailableException("Audio window made no analysis progress");
+                }
                 throw new IOException("Audio window made no analysis progress");
             }
             if (decoded.samples.length >= SkipFingerprint.SAMPLE_RATE * SkipFingerprint.FRAME_MS / 1_000) {
@@ -601,6 +602,19 @@ public final class SkipManager {
         private void checkCancelled() throws InterruptedException {
             if (task.isCancellationRequested()) {
                 throw new InterruptedException();
+            }
+        }
+
+        private void checkpoint() {
+            synchronized (SkipManager.this) {
+                if (callback != null || !cacheableSource(audioUri) || jobs.get(key) != this) {
+                    return;
+                }
+                try {
+                    analysisCache.write(feedId, episodeId,
+                            new SkipAnalysisCache.Entry(identity, revision, durationMs, coverage, hits));
+                } catch (IOException ignored) {
+                }
             }
         }
 
@@ -764,6 +778,10 @@ public final class SkipManager {
 
     private static boolean reusableSource(Uri uri) {
         return uri.getScheme() == null || "file".equals(uri.getScheme());
+    }
+
+    private static boolean cacheableSource(Uri uri) {
+        return reusableSource(uri) || SkipStreamingSource.isStreaming(uri);
     }
 
     private static String sourceIdentity(Uri uri) {
