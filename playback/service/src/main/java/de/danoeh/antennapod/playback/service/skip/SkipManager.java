@@ -162,16 +162,29 @@ public final class SkipManager {
                 && existing.fetchMissing == fetchMissing) {
             return existing.task;
         }
+        SkipAnalysisSnapshot existingSnapshot = snapshots.get(key);
+        if (existing != null && existing.task.isDone() && !existing.task.isCancelled()
+                && reusableSource(audioUri) && existing.audioUri.equals(audioUri)
+                && existing.requestedDurationMs == durationMs && existing.identity != null
+                && existing.identity.equals(sourceIdentity(audioUri)) && existingSnapshot != null
+                && (existingSnapshot.status == SkipAnalysisStatus.READY
+                || existingSnapshot.status == SkipAnalysisStatus.NO_MATCHES)) {
+            return existing.task;
+        }
         if (existing != null && !existing.task.isDone()
                 && (reusableSource(audioUri) || SkipStreamingSource.isStreaming(audioUri))
                 && existing.audioUri.equals(audioUri)
                 && (existing.requestedDurationMs == durationMs || SkipStreamingSource.isStreaming(audioUri))
-                && existing.fetchMissing == fetchMissing) {
+                && (reusableSource(audioUri) || existing.fetchMissing == fetchMissing)) {
+            SkipPriority requestedPriority = priority == null ? SkipPriority.BACKGROUND : priority;
+            if (requestedPriority.value > existing.priority.value) {
+                return existing.task;
+            }
             existing.durationMs = durationMs;
             existing.requestedDurationMs = durationMs;
             existing.positionMs = positionMs;
             existing.bufferedPositionMs = bufferedPositionMs;
-            existing.priority = priority == null ? SkipPriority.BACKGROUND : priority;
+            existing.priority = requestedPriority;
             executor.reprioritize(existing.task, existing.priority);
             existing.wake(true);
             return existing.task;
