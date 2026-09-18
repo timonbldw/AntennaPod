@@ -19,6 +19,7 @@ import java.util.UUID;
 import java.util.concurrent.CancellationException;
 
 public final class SkipManager {
+    private static final long COVERAGE_GAP_TOLERANCE_MS = SkipFingerprint.HOP_MS;
     private static final long WINDOW_MS = 30_000;
     private static final long STREAM_LOOKBEHIND_MS = 10_000;
     private static volatile SkipManager instance;
@@ -445,7 +446,9 @@ public final class SkipManager {
                     throw new IOException("Audio source changed during analysis");
                 }
                 if (SkipStreamingSource.isStreaming(audioUri) && !SkipStreamingSource.isAvailable(audioUri)) {
-                    emit(SkipAnalysisStatus.WAITING_FOR_AUDIO, null);
+                    emit(isFullyCovered(coverage, durationMs)
+                            ? completedStatus(resolveAll(rules, hits, durationMs, coverage))
+                            : SkipAnalysisStatus.WAITING_FOR_AUDIO, null);
                     return;
                 }
                 long coverageStart = analysisStartMs >= 0 ? analysisStartMs
@@ -533,8 +536,7 @@ public final class SkipManager {
                 boolean emptyStreamingWindow = streamingPlayback && coverageEnd <= coverageStart
                         && !fullyCovered;
                 SkipAnalysisStatus status = fullyCovered
-                        ? occurrences.isEmpty() && resolution.detections.isEmpty()
-                        ? SkipAnalysisStatus.NO_MATCHES : SkipAnalysisStatus.READY
+                        ? completedStatus(resolution)
                         : waitingForAudio || emptyStreamingWindow ? SkipAnalysisStatus.WAITING_FOR_AUDIO
                         : done ? streamingPlayback ? SkipAnalysisStatus.WINDOW_READY
                         : occurrences.isEmpty() && resolution.detections.isEmpty()
@@ -554,7 +556,9 @@ public final class SkipManager {
             } catch (InterruptedException | CancellationException ignored) {
                 task.cancel();
             } catch (SkipStreamingSource.UnavailableException ignored) {
-                emit(SkipAnalysisStatus.WAITING_FOR_AUDIO, null);
+                emit(isFullyCovered(coverage, durationMs)
+                        ? completedStatus(resolveAll(rules, hits, durationMs, coverage))
+                        : SkipAnalysisStatus.WAITING_FOR_AUDIO, null);
             } catch (Exception error) {
                 emit(SkipAnalysisStatus.ERROR, error.toString());
             } finally {
@@ -799,13 +803,19 @@ public final class SkipManager {
         return new Resolution(occurrences, detections);
     }
 
+    private static SkipAnalysisStatus completedStatus(Resolution resolution) {
+        return resolution.occurrences.isEmpty() && resolution.detections.isEmpty()
+                ? SkipAnalysisStatus.NO_MATCHES : SkipAnalysisStatus.READY;
+    }
+
     static List<SkipCoverage> mergeCoverage(List<SkipCoverage> first, List<SkipCoverage> second) {
         List<SkipCoverage> ranges = new ArrayList<>(first);
         ranges.addAll(second);
         ranges.sort(Comparator.comparingLong(item -> item.startMs));
         List<SkipCoverage> merged = new ArrayList<>();
         for (SkipCoverage range : ranges) {
-            if (merged.isEmpty() || range.startMs > merged.get(merged.size() - 1).endMs) {
+            if (merged.isEmpty() || range.startMs - merged.get(merged.size() - 1).endMs
+                    > COVERAGE_GAP_TOLERANCE_MS) {
                 merged.add(range);
             } else {
                 SkipCoverage previous = merged.remove(merged.size() - 1);

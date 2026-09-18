@@ -353,6 +353,19 @@ public class SkipResolverTest {
     }
 
     @Test
+    public void markersAcrossDecoderAlignmentGapResolveAsOneSection() {
+        SkipRule rule = rule(SkipRule.Type.BETWEEN, 0, 120_000, 0, 0, 0);
+        List<SkipCoverage> coverage = SkipManager.mergeCoverage(
+                Collections.singletonList(new SkipCoverage(0, 102_864)),
+                Collections.singletonList(new SkipCoverage(102_871, 120_000)));
+        List<SkipOccurrence> result = SkipResolver.resolve(rule,
+                Arrays.asList(start(79_000), end(111_000)), 120_000, coverage);
+        assertEquals(1, result.size());
+        assertEquals(79_000, result.get(0).startMs);
+        assertEquals(113_000, result.get(0).endMs);
+    }
+
+    @Test
     public void diagnosticsDescribeIntervalFailuresMissingMarkersAndFallback() {
         SkipRule rule = rule(SkipRule.Type.BETWEEN, 10_000, 20_000, 0, 0, 0);
         List<SkipDetection> detections = SkipResolver.resolveDetections(rule,
