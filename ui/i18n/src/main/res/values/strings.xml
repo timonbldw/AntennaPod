@@ -4,6 +4,7 @@
     tools:ignore="MissingTranslation">
 
     <string name="audio_skip_playback_analyzing">Analyzing automatic skip sections</string>
+    <string name="audio_skip_playback_analyzing_with_skips">Analyzing automatic skip sections (%1$d)</string>
     <string name="audio_skip_playback_ready">Automatic skip sections available (%1$d)</string>
     <string name="audio_skip_playback_no_matches">No automatic skip sections detected</string>
     <string name="audio_skip_playback_not_analyzed">Automatic skip analysis not started</string>
@@ -16,8 +17,9 @@
     <string name="audio_skip_playback_ready_short">Skips (%1$d)</string>
     <string name="audio_skip_playback_no_matches_short">No skips</string>
     <string name="audio_skip_playback_waiting_for_audio_short">Waiting</string>
-    <string name="audio_skip_playback_waiting_with_skips">Buffering. Automatic skip sections available (%1$d)</string>
-    <string name="audio_skip_playback_waiting_with_skips_short">Buffering · Skips (%1$d)</string>
+    <string name="audio_skip_playback_waiting_with_skips">Waiting for streamed audio. Automatic skip sections available (%1$d)</string>
+    <string name="audio_skip_playback_waiting_with_skips_short">Waiting · Skips (%1$d)</string>
+    <string name="audio_skip_playback_analyzing_with_skips_short">Analyzing · Skips (%1$d)</string>
     <string name="audio_skip_playback_window_ready_short">Skips (%1$d)</string>
     <string name="audio_skip_playback_download_required_short">Download</string>
     <string name="audio_skip_playback_error_short">Unavailable</string>

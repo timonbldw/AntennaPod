@@ -28,6 +28,12 @@ public class SkipWindowTest {
     @Test
     public void coverageDoesNotBridgeUnsearchedGaps() {
         assertEquals(2, SkipManager.mergeCoverage(Collections.singletonList(new SkipCoverage(0, 30_000)),
-                Collections.singletonList(new SkipCoverage(30_001, 60_000))).size());
+                Collections.singletonList(new SkipCoverage(30_033, 60_000))).size());
+    }
+
+    @Test
+    public void coverageBridgesDecoderAlignmentGapsWithinOneHop() {
+        assertEquals(1, SkipManager.mergeCoverage(Collections.singletonList(new SkipCoverage(0, 30_000)),
+                Collections.singletonList(new SkipCoverage(30_007, 60_000))).size());
     }
 }

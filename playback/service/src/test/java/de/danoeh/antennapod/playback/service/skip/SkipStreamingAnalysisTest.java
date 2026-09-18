@@ -199,6 +199,48 @@ public class SkipStreamingAnalysisTest {
     }
 
     @Test
+    public void completedPlaybackAnalysisStaysReadyWhenStreamBecomesUnavailable() throws Exception {
+        String completedFeedId = UUID.randomUUID().toString();
+        float[] marker = randomAudio(4_000, 131);
+        manager.saveRule(completedFeedId, fixedRule(marker));
+        AudioDecoderShadow.audio = new float[60_000 * 8];
+        System.arraycopy(marker, 0, AudioDecoderShadow.audio, 8_000 * 8, marker.length);
+        Uri source = Uri.parse("skip-cache://completed-stream");
+        CountDownLatch firstReady = new CountDownLatch(1);
+        CountDownLatch restartedReady = new CountDownLatch(1);
+        AtomicReference<SkipAnalysisSnapshot> firstResult = new AtomicReference<>();
+        AtomicReference<SkipAnalysisSnapshot> restartedResult = new AtomicReference<>();
+        AtomicBoolean restarted = new AtomicBoolean();
+        try (SkipSubscription subscription = manager.observe(completedFeedId, "completed-stream", snapshot -> {
+            if (snapshot.status == SkipAnalysisStatus.READY) {
+                if (restarted.get()) {
+                    restartedResult.set(snapshot);
+                    restartedReady.countDown();
+                } else {
+                    firstResult.set(snapshot);
+                    firstReady.countDown();
+                }
+            }
+        })) {
+            SkipTask firstTask = manager.analyzeForPlayback(completedFeedId, "completed-stream", source,
+                    60_000, 0, 60_000, SkipPriority.CURRENT_PLAYBACK);
+            assertTrue(firstReady.await(5, TimeUnit.SECONDS));
+            assertTrue(firstTask.isDone());
+            assertEquals(1, firstResult.get().occurrences.size());
+
+            StreamingSourceShadow.available = false;
+            restarted.set(true);
+            SkipTask restartedTask = manager.analyzeForPlayback(completedFeedId, "completed-stream",
+                    source, 60_000, 0, 60_000, SkipPriority.CURRENT_PLAYBACK);
+            assertTrue(restartedReady.await(5, TimeUnit.SECONDS));
+            assertTrue(restartedTask.isDone());
+            assertEquals(SkipAnalysisStatus.READY, restartedResult.get().status);
+            assertEquals(1, restartedResult.get().occurrences.size());
+            assertEquals(60_000, restartedResult.get().coverage.get(0).endMs);
+        }
+    }
+
+    @Test
     public void playbackAnalysisKeepsPartialCoverageAndRetriesRemainingWindow() throws Exception {
         Uri source = Uri.parse("skip-cache://partial-window");
         CountDownLatch partial = new CountDownLatch(1);

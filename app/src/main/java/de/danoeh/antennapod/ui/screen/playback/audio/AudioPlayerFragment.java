@@ -496,8 +496,15 @@ public class AudioPlayerFragment extends Fragment implements
                 && (!snapshot.occurrences.isEmpty() || !snapshot.detections.isEmpty()));
         CharSequence accessibilityDescription;
         if (snapshot.status == SkipAnalysisStatus.ANALYZING) {
-            skipAnalysisButton.setText(getString(R.string.audio_skip_playback_analyzing_short));
-            accessibilityDescription = getString(R.string.audio_skip_playback_analyzing);
+            if (!snapshot.occurrences.isEmpty()) {
+                skipAnalysisButton.setText(getString(R.string.audio_skip_playback_analyzing_with_skips_short,
+                        snapshot.occurrences.size()));
+                accessibilityDescription = getString(R.string.audio_skip_playback_analyzing_with_skips,
+                        snapshot.occurrences.size());
+            } else {
+                skipAnalysisButton.setText(getString(R.string.audio_skip_playback_analyzing_short));
+                accessibilityDescription = getString(R.string.audio_skip_playback_analyzing);
+            }
         } else if (snapshot.status == SkipAnalysisStatus.WAITING_FOR_AUDIO) {
             if (!snapshot.occurrences.isEmpty()) {
                 skipAnalysisButton.setText(getString(R.string.audio_skip_playback_waiting_with_skips_short,
