@@ -183,6 +183,26 @@ public class SkipManagerTest {
     }
 
     @Test
+    public void completedBackgroundFileAnalysisIsReusedByPlayback() throws Exception {
+        Context context = ApplicationProvider.getApplicationContext();
+        SkipManager manager = SkipManager.getInstance(context);
+        String feedId = UUID.randomUUID().toString();
+        Uri source = Uri.parse("/skip-tests/background-analysis.mp3");
+        CountDownLatch ready = new CountDownLatch(1);
+        try (SkipSubscription subscription = manager.observe(feedId, "episode", snapshot -> {
+            if (snapshot.status == SkipAnalysisStatus.NO_MATCHES) {
+                ready.countDown();
+            }
+        })) {
+            SkipTask background = manager.analyze(feedId, "episode", source, 60_000, 0,
+                    SkipPriority.BACKGROUND);
+            assertTrue(ready.await(5, TimeUnit.SECONDS));
+            assertSame(background, manager.analyzeForPlayback(feedId, "episode", source, 60_000, 0,
+                    SkipPriority.CURRENT_PLAYBACK));
+        }
+    }
+
+    @Test
     public void queuedContentReplacementDropsOldJobCallbacks() throws Exception {
         Context context = ApplicationProvider.getApplicationContext();
         SkipManager manager = SkipManager.getInstance(context);

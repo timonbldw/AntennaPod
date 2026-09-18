@@ -30,6 +30,7 @@ import de.danoeh.antennapod.model.download.DownloadResult;
 import de.danoeh.antennapod.model.feed.FeedMedia;
 import de.danoeh.antennapod.model.download.DownloadRequest;
 import de.danoeh.antennapod.net.download.serviceinterface.DownloadServiceInterface;
+import de.danoeh.antennapod.playback.base.SkipAnalysisScheduler;
 import de.danoeh.antennapod.ui.appstartintent.MainActivityStarter;
 import de.danoeh.antennapod.ui.notifications.NotificationUtils;
 import org.apache.commons.io.FileUtils;
@@ -191,6 +192,14 @@ public class EpisodeDownloadWorker extends Worker {
                     getApplicationContext(), downloader.getResult(), request);
             handler.run();
             DBWriter.addDownloadStatus(handler.getUpdatedStatus());
+            SkipAnalysisScheduler scheduler = SkipAnalysisScheduler.get();
+            if (scheduler != null) {
+                try {
+                    scheduler.enqueue(getApplicationContext(), media.getId());
+                } catch (RuntimeException error) {
+                    Log.w(TAG, "Unable to enqueue audio skip analysis", error);
+                }
+            }
             DownloadAnnouncer.announceCompleted(getApplicationContext(), request.getTitle());
             return Result.success();
         }
