@@ -118,6 +118,7 @@ public class AudioSkipRulesActivity extends ToolbarActivity {
     private List<SampleEditorView.EpisodeInfo> testEpisodes = Collections.emptyList();
     private boolean sampleVisible;
     private boolean playerOrigin;
+    private SampleEditorView sampleEditorView;
 
     @Override
     protected void onCreate(@Nullable Bundle state) {
@@ -220,6 +221,14 @@ public class AudioSkipRulesActivity extends ToolbarActivity {
     }
 
     @Override
+    protected void onStop() {
+        if (sampleEditorView != null) {
+            sampleEditorView.stopPlayback();
+        }
+        super.onStop();
+    }
+
+    @Override
     public boolean onSupportNavigateUp() {
         if (editorVisible) {
             if (sampleVisible) {
@@ -243,6 +252,7 @@ public class AudioSkipRulesActivity extends ToolbarActivity {
     private void showRules() {
         editorVisible = false;
         sampleVisible = false;
+        sampleEditorView = null;
         draft = null;
         if (testTask != null) {
             testTask.cancel();
@@ -318,6 +328,7 @@ public class AudioSkipRulesActivity extends ToolbarActivity {
     private void showEditor() {
         editorVisible = true;
         sampleVisible = false;
+        sampleEditorView = null;
         setTitle(R.string.audio_skip_edit_rule);
         if (getSupportActionBar() != null) {
             getSupportActionBar().setDisplayHomeAsUpEnabled(true);
@@ -637,6 +648,7 @@ public class AudioSkipRulesActivity extends ToolbarActivity {
                         showEditor();
                     }
                 });
+        sampleEditorView = view;
         sampleVisible = true;
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
