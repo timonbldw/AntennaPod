@@ -176,6 +176,34 @@ public class SkipResolverTest {
     }
 
     @Test
+    public void sharedMarkerDuplicateAcrossCoverageGapDoesNotRestartClosingOccurrence() {
+        SkipRule rule = rule(SkipRule.Type.BETWEEN, 0, 40_000, 0, 0, 0).withUseStartAsEnd(true);
+        List<SkipMarkerHit> hits = Arrays.asList(start(5_000), start(20_000), start(20_320),
+                start(40_000), start(55_000));
+        List<SkipCoverage> coverage = Arrays.asList(new SkipCoverage(0, 20_200),
+                new SkipCoverage(20_250, 120_000));
+        List<SkipOccurrence> result = resolve(rule, hits, coverage);
+        assertEquals(2, result.size());
+        assertEquals(5_000, result.get(0).startMs);
+        assertEquals(22_000, result.get(0).endMs);
+        assertEquals(40_000, result.get(1).startMs);
+        assertEquals(57_000, result.get(1).endMs);
+        assertTrue(SkipResolver.resolveDetections(rule, hits, 120_000, coverage).isEmpty());
+    }
+
+    @Test
+    public void distinctSharedMarkerAfterClosingOccurrenceStartsNextPair() {
+        SkipRule rule = rule(SkipRule.Type.BETWEEN, 0, 40_000, 0, 0, 0).withUseStartAsEnd(true);
+        List<SkipOccurrence> result = resolve(rule,
+                Arrays.asList(start(5_000), start(20_000), start(21_100), start(30_000)), COMPLETE);
+        assertEquals(2, result.size());
+        assertEquals(5_000, result.get(0).startMs);
+        assertEquals(22_000, result.get(0).endMs);
+        assertEquals(21_100, result.get(1).startMs);
+        assertEquals(32_000, result.get(1).endMs);
+    }
+
+    @Test
     public void oversizedSharedCloseRemainsNextOpening() {
         SkipRule rule = rule(SkipRule.Type.BETWEEN, 0, 30_000, 0, 0, 0).withUseStartAsEnd(true);
         List<SkipMarkerHit> hits = Arrays.asList(start(5_000), start(60_000), start(75_000));
@@ -289,21 +317,39 @@ public class SkipResolverTest {
     }
 
     @Test
-    public void sharedMarkerAfterCoverageGapStartsNextPair() {
+    public void sharedMarkerInsideMaximumWindowRemainsEndpointWhenCoveragePending() {
         SkipRule rule = rule(SkipRule.Type.BETWEEN, 0, 40_000, 0, 0, 0).withUseStartAsEnd(true);
         List<SkipCoverage> coverage = Arrays.asList(new SkipCoverage(10_000, 30_000),
-                new SkipCoverage(34_000, 110_000));
+                new SkipCoverage(34_000, 40_000));
         List<SkipOccurrence> result = resolve(rule,
-                Arrays.asList(start(20_000), start(40_000), start(60_000)), coverage);
-        assertEquals(1, result.size());
-        assertEquals(40_000, result.get(0).startMs);
-        assertEquals(62_000, result.get(0).endMs);
+                Arrays.asList(start(20_000), start(40_000)), coverage);
+        assertTrue(result.isEmpty());
         List<SkipDetection> detections = SkipResolver.resolveDetections(rule,
-                Arrays.asList(start(20_000), start(40_000), start(60_000)), 120_000, coverage);
+                Arrays.asList(start(20_000), start(40_000)), 120_000, coverage);
         assertEquals(2, detections.size());
         assertEquals(20_000, detections.get(0).timeMs);
         assertEquals(40_000, detections.get(1).timeMs);
+        assertEquals(SkipMarker.START, detections.get(0).marker);
         assertEquals(SkipMarker.END, detections.get(1).marker);
+        assertEquals(SkipDetection.Reason.PENDING, detections.get(0).reason);
+        assertEquals(SkipDetection.Reason.PENDING, detections.get(1).reason);
+    }
+
+    @Test
+    public void sharedMarkerAtMaximumBoundaryIsNotReopenedAfterSampleOverhang() {
+        SkipRule rule = rule(SkipRule.Type.BETWEEN, 0, 30_000, 0, 0, 0).withUseStartAsEnd(true);
+        List<SkipMarkerHit> hits = Arrays.asList(start(5_000), start(35_000), start(50_000));
+        List<SkipOccurrence> result = resolve(rule, hits, COMPLETE);
+        assertEquals(0, result.size());
+        List<SkipDetection> detections = SkipResolver.resolveDetections(rule, hits, 120_000, COMPLETE);
+        assertEquals(3, detections.size());
+        assertEquals(5_000, detections.get(0).timeMs);
+        assertEquals(SkipMarker.START, detections.get(0).marker);
+        assertEquals(35_000, detections.get(1).timeMs);
+        assertEquals(SkipMarker.END, detections.get(1).marker);
+        assertEquals(50_000, detections.get(2).timeMs);
+        assertEquals(SkipMarker.START, detections.get(2).marker);
+        assertEquals(SkipDetection.Reason.MISSING_END, detections.get(2).reason);
     }
 
     @Test

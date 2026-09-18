@@ -499,8 +499,15 @@ public class AudioPlayerFragment extends Fragment implements
             skipAnalysisButton.setText(getString(R.string.audio_skip_playback_analyzing_short));
             accessibilityDescription = getString(R.string.audio_skip_playback_analyzing);
         } else if (snapshot.status == SkipAnalysisStatus.WAITING_FOR_AUDIO) {
-            skipAnalysisButton.setText(getString(R.string.audio_skip_playback_waiting_for_audio_short));
-            accessibilityDescription = getString(R.string.audio_skip_playback_waiting_for_audio);
+            if (!snapshot.occurrences.isEmpty()) {
+                skipAnalysisButton.setText(getString(R.string.audio_skip_playback_waiting_with_skips_short,
+                        snapshot.occurrences.size()));
+                accessibilityDescription = getString(R.string.audio_skip_playback_waiting_with_skips,
+                        snapshot.occurrences.size());
+            } else {
+                skipAnalysisButton.setText(getString(R.string.audio_skip_playback_waiting_for_audio_short));
+                accessibilityDescription = getString(R.string.audio_skip_playback_waiting_for_audio);
+            }
         } else if (snapshot.status == SkipAnalysisStatus.WINDOW_READY) {
             skipAnalysisButton.setText(snapshot.occurrences.isEmpty() && !snapshot.detections.isEmpty()
                     ? getString(R.string.audio_skip_playback_diagnostics_only_short,
@@ -665,6 +672,9 @@ public class AudioPlayerFragment extends Fragment implements
         } else if (event.hasEnded()) {
             progressIndicator.setVisibility(View.GONE);
             refreshSkipAnalysisSource();
+        } else if (event.hasBufferedPosition()) {
+            sbPosition.setSecondaryProgress((int) (event.getBufferedPosition()
+                    * sbPosition.getMax() / (float) event.getDuration()));
         } else if (currentMedia != null && !currentMedia.localFileAvailable()) {
             sbPosition.setSecondaryProgress((int) (event.getProgress() * sbPosition.getMax()));
         } else {

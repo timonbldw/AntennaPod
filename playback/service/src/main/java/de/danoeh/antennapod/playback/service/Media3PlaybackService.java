@@ -105,6 +105,8 @@ public class Media3PlaybackService extends MediaLibraryService {
     private Disposable mediaLoaderDisposable;
     private Disposable positionObserverDisposable;
     private Disposable skipPositionObserverDisposable;
+    private Disposable bufferObserverDisposable;
+    private Disposable skipAnalysisObserverDisposable;
     private Disposable queueLoaderDisposable;
     private long lastPositionSaveTime = 0;
     private SleepTimer sleepTimer;
@@ -361,6 +363,9 @@ public class Media3PlaybackService extends MediaLibraryService {
             if (playbackState == Player.STATE_READY && currentPlayable != null) {
                 startSkipAnalysis(currentPlayable);
             }
+            if (currentPlayable != null) {
+                setupBufferObserver();
+            }
             if (playbackState == Player.STATE_ENDED && currentPlayable != null) {
                 handlePlaybackEnded();
             }
@@ -370,6 +375,7 @@ public class Media3PlaybackService extends MediaLibraryService {
         public void onTimelineChanged(@NonNull Timeline timeline, int reason) {
             if (currentPlayable != null) {
                 startSkipAnalysis(currentPlayable);
+                setupBufferObserver();
             }
         }
 
@@ -420,6 +426,7 @@ public class Media3PlaybackService extends MediaLibraryService {
         @Override
         public void onMediaItemTransition(@Nullable MediaItem mediaItem, int reason) {
             if (mediaItem == null) {
+                cancelLoadedObservers();
                 if (currentPlayable != null
                         && CastPlayerWrapper.hasPlaybackJustFinished(Media3PlaybackService.this)) {
                     handlePlaybackEnded();
@@ -455,6 +462,7 @@ public class Media3PlaybackService extends MediaLibraryService {
     public void onDestroy() {
         PlaybackService.isRunning = false;
         cancelPositionObserver();
+        cancelLoadedObservers();
         cancelSkipAnalysis();
         if (sleepTimer != null) {
             sleepTimer.stop();
@@ -541,6 +549,46 @@ public class Media3PlaybackService extends MediaLibraryService {
         }
     }
 
+    private void setupBufferObserver() {
+        if (bufferObserverDisposable != null) {
+            return;
+        }
+        bufferObserverDisposable = Observable.interval(1, TimeUnit.SECONDS)
+                .observeOn(AndroidSchedulers.mainThread())
+                .subscribe(ignored -> publishBufferPosition(),
+                        error -> Log.e(TAG, "Buffer observer error", error));
+        publishBufferPosition();
+    }
+
+    private void setupSkipAnalysisObserver() {
+        if (skipAnalysisObserverDisposable != null) {
+            return;
+        }
+        skipAnalysisObserverDisposable = Observable.interval(2, TimeUnit.SECONDS)
+                .observeOn(AndroidSchedulers.mainThread())
+                .subscribe(ignored -> updateStreamingSkipPosition(),
+                        error -> Log.e(TAG, "Skip analysis observer error", error));
+    }
+
+    private void cancelLoadedObservers() {
+        if (bufferObserverDisposable != null) {
+            bufferObserverDisposable.dispose();
+            bufferObserverDisposable = null;
+        }
+        if (skipAnalysisObserverDisposable != null) {
+            skipAnalysisObserverDisposable.dispose();
+            skipAnalysisObserverDisposable = null;
+        }
+    }
+
+    private void publishBufferPosition() {
+        if (player == null || player.getDuration() <= 0 || player.getBufferedPosition() < 0) {
+            return;
+        }
+        EventBus.getDefault().post(BufferUpdateEvent.bufferedPositionUpdate(
+                Math.min(player.getBufferedPosition(), player.getDuration()), player.getDuration()));
+    }
+
     private void startSkipAnalysis(FeedMedia media) {
         long playerDuration = player == null ? 0 : player.getDuration();
         long duration = skipSubscription == null ? getSkipAnalysisDuration(media) : playerDuration;
@@ -562,8 +610,11 @@ public class Media3PlaybackService extends MediaLibraryService {
         skipAnalysisDuration = duration;
         skipAnalysisSource = audioUri;
         SkipManager manager = SkipManager.getInstance(this);
-        skipTask = manager.analyze(feedId, episodeId, audioUri, duration,
-                player.getCurrentPosition(), SkipPriority.CURRENT_PLAYBACK);
+        skipTask = manager.analyzeForPlayback(feedId, episodeId, audioUri, duration,
+                player.getCurrentPosition(), getBufferedPosition(), SkipPriority.CURRENT_PLAYBACK);
+        if (SkipStreamingSource.isStreaming(audioUri)) {
+            setupSkipAnalysisObserver();
+        }
         if (!observingEpisode) {
             skipSubscription = manager.observe(feedId, episodeId,
                     snapshot -> mainHandler.post(() -> updateSkipSnapshot(generation, media, snapshot)));
@@ -581,9 +632,9 @@ public class Media3PlaybackService extends MediaLibraryService {
         if (skipTask != null && !skipTask.isDone()) {
             return;
         }
-        skipTask = SkipManager.getInstance(this).analyze(
+        skipTask = SkipManager.getInstance(this).analyzeForPlayback(
                 String.valueOf(media.getItem().getFeed().getId()), String.valueOf(media.getItem().getId()),
-                audioUri, duration, player.getCurrentPosition(),
+                audioUri, duration, player.getCurrentPosition(), getBufferedPosition(),
                 SkipPriority.CURRENT_PLAYBACK);
     }
 
@@ -647,7 +698,7 @@ public class Media3PlaybackService extends MediaLibraryService {
 
     private void handleSeek(long positionMs) {
         previousSkipPosition = positionMs;
-        updateStreamingSkipPosition(positionMs, player.getPlaybackParameters().speed);
+        updateStreamingSkipPosition(positionMs, player.getPlaybackParameters().speed, true);
         if (!internalSeek && isCurrentPlayableMediaItem()) {
             SkipPlaybackDecision.onUserSeek(skipOccurrences, positionMs, skipDecisionState);
             if (skipFeedId != null && skipEpisodeId != null) {
@@ -658,9 +709,27 @@ public class Media3PlaybackService extends MediaLibraryService {
     }
 
     private void updateStreamingSkipPosition(long positionMs, float speed) {
+        updateStreamingSkipPosition(positionMs, speed, false);
+    }
+
+    private void updateStreamingSkipPosition(long positionMs, float speed, boolean resetAnalysisPosition) {
         if (skipFeedId != null && skipEpisodeId != null) {
-            SkipManager.getInstance(this).updateStreamingPosition(skipFeedId, skipEpisodeId, positionMs, speed);
+            SkipManager.getInstance(this).updateStreamingPosition(skipFeedId, skipEpisodeId, positionMs, speed,
+                    getBufferedPosition(), resetAnalysisPosition);
         }
+    }
+
+    private void updateStreamingSkipPosition() {
+        if (player != null) {
+            updateStreamingSkipPosition(player.getCurrentPosition(), player.getPlaybackParameters().speed);
+        }
+    }
+
+    private long getBufferedPosition() {
+        if (player == null || player.getDuration() <= 0 || player.getBufferedPosition() < 0) {
+            return -1;
+        }
+        return Math.min(player.getBufferedPosition(), player.getDuration());
     }
 
     private boolean isCurrentSkipSource(@Nullable FeedMedia media) {
@@ -720,6 +789,10 @@ public class Media3PlaybackService extends MediaLibraryService {
         skipAnalysisDuration = 0;
         skipAnalysisSource = null;
         previousSkipPosition = -1;
+        if (skipAnalysisObserverDisposable != null) {
+            skipAnalysisObserverDisposable.dispose();
+            skipAnalysisObserverDisposable = null;
+        }
     }
 
     @OptIn(markerClass = UnstableApi.class)
@@ -783,6 +856,7 @@ public class Media3PlaybackService extends MediaLibraryService {
     private void switchToPlayable(FeedMedia media) {
         cancelSkipAnalysis();
         currentPlayable = media;
+        setupBufferObserver();
         currentPlayable.onPlaybackStart();
 
         float speed = PlaybackSpeedUtils.getCurrentPlaybackSpeed(currentPlayable);

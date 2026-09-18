@@ -49,7 +49,15 @@ final class SkipAudioDecoder {
         try {
             if (SkipStreamingSource.isStreaming(uri)) {
                 streamingSource = SkipStreamingSource.open(uri, fetchMissing);
-                extractor.setDataSource(streamingSource);
+                streamingSource.setDecoderPhase("extractor initialization");
+                try {
+                    extractor.setDataSource(streamingSource);
+                } catch (IOException | RuntimeException error) {
+                    streamingSource.throwIfInterrupted();
+                    streamingSource.throwIfUnavailable();
+                    streamingSource.throwIfCacheMiss();
+                    throw error;
+                }
             } else if (uri.getScheme() == null || "file".equals(uri.getScheme())) {
                 extractor.setDataSource(uri.getPath());
             } else {
@@ -73,10 +81,26 @@ final class SkipAudioDecoder {
             codec.configure(inputFormat, null, null, 0);
             codec.start();
             started = true;
-            extractor.seekTo(Math.max(0, startMs - 250) * 1_000, MediaExtractor.SEEK_TO_PREVIOUS_SYNC);
+            long seekStartMs = streamingSource != null && !fetchMissing
+                    ? startMs : Math.max(0, startMs - 250);
+            if (streamingSource != null) {
+                streamingSource.setDecoderPhase("extractor seek");
+            }
+            try {
+                extractor.seekTo(seekStartMs * 1_000, MediaExtractor.SEEK_TO_PREVIOUS_SYNC);
+            } catch (RuntimeException error) {
+                if (streamingSource != null) {
+                    streamingSource.throwIfInterrupted();
+                    streamingSource.throwIfUnavailable();
+                    streamingSource.throwIfCacheMiss();
+                }
+                throw error;
+            }
             if (streamingSource != null) {
                 streamingSource.throwIfInterrupted();
                 streamingSource.throwIfUnavailable();
+                streamingSource.throwIfCacheMiss();
+                streamingSource.setDecoderPhase("sample reading");
             }
             int sampleRate = inputFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE);
             int channels = inputFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT);
@@ -87,6 +111,8 @@ final class SkipAudioDecoder {
             boolean inputEnded = false;
             boolean outputEnded = false;
             boolean sourceEnded = false;
+            boolean cacheMissed = false;
+            boolean cacheMissPending = false;
             int idleIterations = 0;
             int encoding = AudioFormat.ENCODING_PCM_16BIT;
             double previousEndUs = -1;
@@ -98,25 +124,59 @@ final class SkipAudioDecoder {
                 if (!inputEnded) {
                     int inputIndex = codec.dequeueInputBuffer(CODEC_TIMEOUT_US);
                     if (inputIndex >= 0) {
+                        if (cacheMissPending) {
+                            long endTimeUs = previousEndUs >= 0 ? (long) previousEndUs : startMs * 1_000L;
+                            codec.queueInputBuffer(inputIndex, 0, 0, endTimeUs,
+                                    MediaCodec.BUFFER_FLAG_END_OF_STREAM);
+                            inputEnded = true;
+                            continue;
+                        }
                         ByteBuffer inputBuffer = codec.getInputBuffer(inputIndex);
                         if (inputBuffer == null) {
                             throw new IOException("Decoder input buffer unavailable");
                         }
                         inputBuffer.clear();
-                        int size = extractor.readSampleData(inputBuffer, 0);
-                        if (streamingSource != null) {
-                            streamingSource.throwIfInterrupted();
-                            streamingSource.throwIfUnavailable();
-                        }
-                        long timeUs = extractor.getSampleTime();
-                        sourceEnded = size < 0 || timeUs < 0;
-                        if (sourceEnded || timeUs >= (endMs + 250) * 1_000) {
-                            codec.queueInputBuffer(inputIndex, 0, 0, Math.max(0, timeUs),
-                                    MediaCodec.BUFFER_FLAG_END_OF_STREAM);
-                            inputEnded = true;
-                        } else {
-                            codec.queueInputBuffer(inputIndex, 0, size, timeUs, 0);
-                            extractor.advance();
+                        boolean inputQueued = false;
+                        try {
+                            int size = extractor.readSampleData(inputBuffer, 0);
+                            if (streamingSource != null) {
+                                streamingSource.throwIfInterrupted();
+                                streamingSource.throwIfUnavailable();
+                                streamingSource.throwIfCacheMiss();
+                            }
+                            long timeUs = extractor.getSampleTime();
+                            sourceEnded = size < 0 || timeUs < 0;
+                            if (sourceEnded || timeUs >= (endMs + 250) * 1_000) {
+                                codec.queueInputBuffer(inputIndex, 0, 0, Math.max(0, timeUs),
+                                        MediaCodec.BUFFER_FLAG_END_OF_STREAM);
+                                inputEnded = true;
+                            } else {
+                                codec.queueInputBuffer(inputIndex, 0, size, timeUs, 0);
+                                inputQueued = true;
+                                extractor.advance();
+                                if (streamingSource != null) {
+                                    streamingSource.throwIfInterrupted();
+                                    streamingSource.throwIfUnavailable();
+                                    streamingSource.throwIfCacheMiss();
+                                }
+                            }
+                        } catch (IOException | RuntimeException error) {
+                            if (streamingSource != null) {
+                                streamingSource.throwIfInterrupted();
+                                streamingSource.throwIfUnavailable();
+                            }
+                            if (streamingSource == null || fetchMissing || !streamingSource.isCacheMiss()) {
+                                throw error;
+                            }
+                            cacheMissed = true;
+                            if (inputQueued) {
+                                cacheMissPending = true;
+                            } else {
+                                long endTimeUs = previousEndUs >= 0 ? (long) previousEndUs : startMs * 1_000L;
+                                codec.queueInputBuffer(inputIndex, 0, 0, endTimeUs,
+                                        MediaCodec.BUFFER_FLAG_END_OF_STREAM);
+                                inputEnded = true;
+                            }
                         }
                     }
                 }
@@ -187,14 +247,25 @@ final class SkipAudioDecoder {
                 streamingSource.throwIfInterrupted();
                 streamingSource.throwIfUnavailable();
             }
-            if (previewAccumulator != null) {
-                return previewAccumulator.result(sourceEnded && outputEnded);
+            try {
+                if (previewAccumulator != null) {
+                    DecodedAudio result = previewAccumulator.result(sourceEnded && outputEnded);
+                    return cacheMissed ? result.withCacheMiss() : result;
+                }
+                DecodedAudio result = accumulator.result(sourceEnded && outputEnded, previousEndUs);
+                return cacheMissed ? result.withCacheMiss() : result;
+            } catch (IOException error) {
+                if (cacheMissed) {
+                    throw new SkipStreamingSource.UnavailableException(
+                            "Audio cache miss occurred before decoded audio progress", error);
+                }
+                throw error;
             }
-            return accumulator.result(sourceEnded && outputEnded, previousEndUs);
         } catch (IOException | RuntimeException e) {
             if (streamingSource != null) {
                 streamingSource.throwIfInterrupted();
                 streamingSource.throwIfUnavailable();
+                streamingSource.throwIfCacheMiss();
             }
             throw e;
         } finally {
@@ -269,6 +340,7 @@ final class SkipAudioDecoder {
         final long durationMs;
         final boolean complete;
         final boolean eof;
+        final boolean cacheMiss;
         final int sampleRate;
         final int channels;
 
@@ -282,13 +354,23 @@ final class SkipAudioDecoder {
 
         DecodedAudio(long startMs, float[] samples, long durationMs, boolean complete, boolean eof,
                      int sampleRate, int channels) {
+            this(startMs, samples, durationMs, complete, eof, false, sampleRate, channels);
+        }
+
+        private DecodedAudio(long startMs, float[] samples, long durationMs, boolean complete, boolean eof,
+                             boolean cacheMiss, int sampleRate, int channels) {
             this.startMs = startMs;
             this.samples = samples;
             this.durationMs = durationMs;
             this.complete = complete;
             this.eof = eof;
+            this.cacheMiss = cacheMiss;
             this.sampleRate = sampleRate;
             this.channels = channels;
+        }
+
+        DecodedAudio withCacheMiss() {
+            return new DecodedAudio(startMs, samples, durationMs, complete, eof, true, sampleRate, channels);
         }
     }
 

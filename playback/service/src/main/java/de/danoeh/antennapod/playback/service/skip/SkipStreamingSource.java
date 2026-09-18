@@ -152,6 +152,12 @@ public final class SkipStreamingSource {
         private final Thread requestingThread;
         private volatile UnavailableException failure;
         private volatile boolean failureIsTailCacheMiss;
+        private volatile boolean cacheMiss;
+        private volatile boolean cacheMissAfterData;
+        private volatile long missingPosition = -1;
+        private volatile int missingLength;
+        private volatile String missingPhase;
+        private volatile String decoderPhase;
         private volatile boolean interrupted;
         private long fetchedBytes;
         private volatile boolean closed;
@@ -188,8 +194,21 @@ public final class SkipStreamingSource {
             }
             int totalRead = 0;
             while (totalRead < readSize) {
-                int read = readSpan(position + totalRead, buffer, offset + totalRead, readSize - totalRead);
-                totalRead += read;
+                try {
+                    int read = readSpan(position + totalRead, buffer, offset + totalRead, readSize - totalRead);
+                    totalRead += read;
+                } catch (UnavailableException error) {
+                    if (!cacheMiss) {
+                        throw error;
+                    }
+                    if (totalRead == 0) {
+                        return 0;
+                    }
+                    if (missingPosition == position + totalRead) {
+                        cacheMissAfterData = true;
+                    }
+                    return totalRead;
+                }
             }
             return totalRead;
         }
@@ -209,7 +228,7 @@ public final class SkipStreamingSource {
                     if (fetchMissing) {
                         return fetchSpan(position, buffer, offset, readSize);
                     }
-                    throw unavailableCacheMiss(position);
+                    throw unavailableCacheMiss(position, readSize);
                 }
                 span = source.cache.startReadWriteNonBlocking(source.cacheKey, position, readSize);
             } catch (RuntimeException | CacheException e) {
@@ -222,7 +241,7 @@ public final class SkipStreamingSource {
                 if (fetchMissing) {
                     return fetchSpan(position, buffer, offset, readSize);
                 }
-                throw unavailableCacheMiss(position);
+                throw unavailableCacheMiss(position, readSize);
             }
             int available = (int) Math.min(readSize, span.position + span.length - position);
             try (RandomAccessFile file = new RandomAccessFile(span.file, "r")) {
@@ -425,12 +444,34 @@ public final class SkipStreamingSource {
             if (!source.available) {
                 throw new UnavailableException("Streaming cache source is unavailable");
             }
-            if (failure != null && (!"audio/mpeg".equals(mime) || !failureIsTailCacheMiss)) {
+            if (failure != null) {
                 throw failure;
             }
-            if (failureIsTailCacheMiss) {
-                failure = null;
+            if (cacheMiss && (!"audio/mpeg".equals(mime)
+                    || (!failureIsTailCacheMiss && !cacheMissAfterData))) {
+                throw cacheMissException(missingPosition, missingLength, missingPhase);
+            }
+            if (cacheMiss) {
                 failureIsTailCacheMiss = false;
+                cacheMiss = false;
+                cacheMissAfterData = false;
+                missingPosition = -1;
+                missingLength = 0;
+                missingPhase = null;
+            }
+        }
+
+        void setDecoderPhase(String decoderPhase) {
+            this.decoderPhase = decoderPhase;
+        }
+
+        boolean isCacheMiss() {
+            return cacheMiss;
+        }
+
+        void throwIfCacheMiss() throws UnavailableException {
+            if (cacheMiss) {
+                throw cacheMissException(missingPosition, missingLength, missingPhase);
             }
         }
 
@@ -452,19 +493,34 @@ public final class SkipStreamingSource {
         private UnavailableException unavailable(String message, Throwable cause) {
             UnavailableException exception = cause == null
                     ? new UnavailableException(message) : new UnavailableException(message, cause);
-            failure = exception;
+            if (failure == null) {
+                failure = exception;
+            }
             failureIsTailCacheMiss = false;
+            cacheMiss = false;
+            cacheMissAfterData = false;
             return exception;
         }
 
-        private UnavailableException unavailableCacheMiss(long position) {
-            UnavailableException exception = new UnavailableException("Requested audio bytes are not cached");
-            boolean tailCacheMiss = position >= Math.max(0, size - 128);
-            if (failure == null || failureIsTailCacheMiss) {
-                failure = exception;
-                failureIsTailCacheMiss = tailCacheMiss;
+        private UnavailableException unavailableCacheMiss(long position, int length) {
+            UnavailableException exception = cacheMissException(position, length, decoderPhase);
+            if (!cacheMiss) {
+                cacheMiss = true;
+                failureIsTailCacheMiss = position >= Math.max(0, size - 128);
+                missingPosition = position;
+                missingLength = length;
+                missingPhase = decoderPhase;
             }
             return exception;
+        }
+
+        private UnavailableException cacheMissException(long position, int length, String phase) {
+            String message = "Requested audio bytes are not cached at byte " + position
+                    + " (length " + length + ")";
+            if (phase != null) {
+                message += " during " + phase;
+            }
+            return new UnavailableException(message);
         }
     }
 
