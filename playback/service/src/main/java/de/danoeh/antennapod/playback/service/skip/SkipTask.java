@@ -6,6 +6,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public final class SkipTask {
     private final AtomicBoolean cancelled = new AtomicBoolean();
     private volatile Future<?> future;
+    private volatile Runnable cancellationListener;
     private volatile boolean complete;
 
     void attach(Future<?> taskFuture) {
@@ -20,9 +21,21 @@ public final class SkipTask {
     }
 
     public boolean cancel() {
-        cancelled.set(true);
+        if (cancelled.compareAndSet(false, true)) {
+            Runnable listener = cancellationListener;
+            if (listener != null) {
+                listener.run();
+            }
+        }
         Future<?> taskFuture = future;
         return taskFuture == null || taskFuture.cancel(true);
+    }
+
+    void setCancellationListener(Runnable listener) {
+        cancellationListener = listener;
+        if (cancelled.get()) {
+            listener.run();
+        }
     }
 
     public boolean isCancelled() {
