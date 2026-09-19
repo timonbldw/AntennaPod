@@ -19,9 +19,13 @@ import java.util.UUID;
 import java.util.concurrent.CancellationException;
 
 public final class SkipManager {
+    private static final String MATCH_TAG = "SkipMatch";
     private static final long COVERAGE_GAP_TOLERANCE_MS = SkipFingerprint.HOP_MS;
     private static final long WINDOW_MS = 30_000;
     private static final long STREAM_LOOKBEHIND_MS = 10_000;
+    private static final long LOCAL_SEEK_FALLBACK_MS = 1_000;
+    private static final int LOCAL_DECODE_RETRIES = 1;
+    private static final int MAX_RETAINED_DECODER_SESSIONS = 2;
     private static volatile SkipManager instance;
 
     private final Context context;
@@ -31,6 +35,7 @@ public final class SkipManager {
     private final Map<String, SkipAnalysisSnapshot> snapshots = new HashMap<>();
     private final Map<String, List<SkipAnalysisCallback>> observers = new HashMap<>();
     private final Map<String, AnalysisJob> jobs = new HashMap<>();
+    private final List<AnalysisJob> decoderSessionOwners = new ArrayList<>();
 
     private SkipManager(Context context) {
         this.context = context.getApplicationContext();
@@ -281,6 +286,11 @@ public final class SkipManager {
                 if (!SkipFingerprint.isUsable(fingerprint)) {
                     throw new IllegalArgumentException("Sample is silent or too weak");
                 }
+                if (BuildConfig.DEBUG && Log.isLoggable(MATCH_TAG, Log.DEBUG)) {
+                    Log.d(MATCH_TAG, "extracted marker=" + marker + " sample=" + fingerprint.durationMs()
+                            + "ms range=" + startMs + ".." + endMs + " sourcePosition=" + sourcePositionMs
+                            + " markerOffset=" + markerOffsetMs + " frames=" + fingerprint.frameCount());
+                }
                 if (!Thread.currentThread().isInterrupted()) {
                     callback.onSuccess(new SkipSample(UUID.randomUUID().toString(), marker,
                             endMs - startMs, markerOffsetMs, sourcePositionMs, fingerprint));
@@ -391,6 +401,9 @@ public final class SkipManager {
         private boolean streamingPassExhausted;
         private long streamingAnalysisEndMs = -1;
         private boolean streamingUnsupported;
+        private String waitingError;
+        private SkipAudioDecoder.Session decoderSession;
+        private volatile boolean running;
 
         AnalysisJob(String feedId, String episodeId, Uri audioUri, long durationMs, long positionMs,
                     SkipPriority priority, List<SkipRule> rules, SkipAnalysisCallback callback) {
@@ -416,6 +429,7 @@ public final class SkipManager {
             this.callback = callback;
             this.analysisStartMs = analysisStartMs;
             this.analysisEndMs = analysisEndMs;
+            task.setCancellationListener(this::cancelDecoderSession);
         }
 
         synchronized void enqueue() {
@@ -440,6 +454,11 @@ public final class SkipManager {
         public void run() {
             boolean continueAnalysis = false;
             boolean waitingForAudio = false;
+            synchronized (SkipManager.this) {
+                synchronized (this) {
+                    running = true;
+                }
+            }
             try {
                 checkCancelled();
                 if (identity == null) {
@@ -455,13 +474,15 @@ public final class SkipManager {
                     emit(SkipAnalysisStatus.NO_MATCHES, null);
                     return;
                 }
+                waitingError = null;
                 if (reusableSource(audioUri) && !identity.equals(sourceIdentity(audioUri))) {
                     throw new IOException("Audio source changed during analysis");
                 }
                 if (SkipStreamingSource.isStreaming(audioUri) && !SkipStreamingSource.isAvailable(audioUri)) {
-                    emit(isFullyCovered(coverage, durationMs)
-                            ? completedStatus(resolveAll(rules, hits, durationMs, coverage))
-                            : SkipAnalysisStatus.WAITING_FOR_AUDIO, null);
+                    waitingError = "Streaming cache source is unavailable";
+                    boolean complete = isFullyCovered(coverage, durationMs);
+                    emit(complete ? completedStatus(resolveAll(rules, hits, durationMs, coverage))
+                            : SkipAnalysisStatus.WAITING_FOR_AUDIO, complete ? null : waitingError);
                     return;
                 }
                 long coverageStart = analysisStartMs >= 0 ? analysisStartMs
@@ -473,6 +494,7 @@ public final class SkipManager {
                 boolean cacheOnlyPlayback = streamingPlayback && !fetchMissing;
                 boolean streamingPassHasMore = false;
                 boolean streamingCoverageChanged = false;
+                boolean streamingFetchFailed = false;
                 if (cacheOnlyPlayback) {
                     long startMs;
                     long endMs;
@@ -500,9 +522,11 @@ public final class SkipManager {
                                     + " cursor=" + streamingAnalysisPositionMs);
                         }
                         try {
-                            analyzeWindow(startMs, endMs);
+                            analyzeWindow(startMs, endMs, true);
                             checkpoint();
                         } catch (SkipStreamingSource.UnavailableException error) {
+                            waitingError = error.toString();
+                            streamingFetchFailed = error.getSuppressed().length > 0;
                             if (BuildConfig.DEBUG) {
                                 Log.d("SkipManager", "Cache analysis deferred: " + error.getMessage());
                             }
@@ -519,7 +543,7 @@ public final class SkipManager {
                         if (resetStreamingPassRequested) {
                             return;
                         }
-                        streamingPassHasMore = !resetStreamingPassRequested
+                        streamingPassHasMore = !resetStreamingPassRequested && !streamingFetchFailed
                                 && firstUncovered(Math.max(coverageStart, streamingAnalysisPositionMs),
                                 streamingAnalysisEndMs, coverage) < streamingAnalysisEndMs;
                     }
@@ -535,7 +559,7 @@ public final class SkipManager {
                             ? firstUncovered(coverageStart, coverageEnd, coverage)
                             : chooseWindowStart(positionMs, coverageEnd, coverage);
                     startMs -= startMs % SkipFingerprint.HOP_MS;
-                    waitingForAudio = analyzeWindow(startMs, Math.min(coverageEnd, startMs + WINDOW_MS));
+                    waitingForAudio = analyzeWindow(startMs, Math.min(coverageEnd, startMs + WINDOW_MS), false);
                     checkpoint();
                     checkCancelled();
                 }
@@ -558,7 +582,7 @@ public final class SkipManager {
                 boolean suppressUnchangedProbe = cacheOnlyPlayback && status == SkipAnalysisStatus.ANALYZING
                         && !streamingCoverageChanged;
                 if (!suppressUnchangedProbe) {
-                    emit(status, null);
+                    emit(status, status == SkipAnalysisStatus.WAITING_FOR_AUDIO ? waitingError : null);
                 }
                 boolean moreStreamingAudio = streamingPlayback
                         && !isCoveredFrom(coverage, streamingWindowStart(), streamingWindowEnd());
@@ -568,25 +592,47 @@ public final class SkipManager {
                 }
             } catch (InterruptedException | CancellationException ignored) {
                 task.cancel();
-            } catch (SkipStreamingSource.UnavailableException ignored) {
-                emit(isFullyCovered(coverage, durationMs)
-                        ? completedStatus(resolveAll(rules, hits, durationMs, coverage))
-                        : SkipAnalysisStatus.WAITING_FOR_AUDIO, null);
+            } catch (SkipStreamingSource.UnavailableException error) {
+                boolean complete = isFullyCovered(coverage, durationMs);
+                if (BuildConfig.DEBUG) {
+                    Log.d("SkipManager", "Streaming analysis unavailable source=" + audioUri
+                            + " position=" + positionMs + " buffered=" + bufferedPositionMs
+                            + " coverage=" + coverage + " error=" + error.getMessage(), error);
+                }
+                emit(complete ? completedStatus(resolveAll(rules, hits, durationMs, coverage))
+                        : SkipAnalysisStatus.WAITING_FOR_AUDIO, complete ? null : error.toString());
             } catch (Exception error) {
+                if (BuildConfig.DEBUG) {
+                    Log.d("SkipManager", "Streaming analysis error source=" + audioUri
+                            + " position=" + positionMs + " buffered=" + bufferedPositionMs
+                            + " coverage=" + coverage, error);
+                }
                 emit(SkipAnalysisStatus.ERROR, error.toString());
             } finally {
-                synchronized (this) {
-                    queued = false;
-                    if ((!continueAnalysis && wakeRequested) || resetStreamingPassRequested) {
-                        streamingAnalysisPositionMs = -1;
-                        streamingAnalysisEndMs = -1;
-                        continueAnalysis = true;
-                        wakeRequested = false;
-                        resetStreamingPassRequested = false;
+                SkipAudioDecoder.Session sessionToClose = null;
+                boolean enqueueContinuation;
+                synchronized (SkipManager.this) {
+                    synchronized (this) {
+                        if ((!continueAnalysis && wakeRequested) || resetStreamingPassRequested) {
+                            streamingAnalysisPositionMs = -1;
+                            streamingAnalysisEndMs = -1;
+                            continueAnalysis = true;
+                            wakeRequested = false;
+                            resetStreamingPassRequested = false;
+                        }
+                        enqueueContinuation = continueAnalysis && !task.isCancellationRequested();
+                        if (!enqueueContinuation) {
+                            sessionToClose = detachDecoderSessionLocked();
+                        }
+                        running = false;
+                        queued = enqueueContinuation;
                     }
                 }
-                if (continueAnalysis && !task.isCancellationRequested()) {
-                    enqueue();
+                if (sessionToClose != null) {
+                    sessionToClose.close();
+                }
+                if (enqueueContinuation) {
+                    executor.execute(priority, task, this);
                 }
             }
         }
@@ -673,7 +719,8 @@ public final class SkipManager {
             return longest;
         }
 
-        private boolean analyzeWindow(long startMs, long endMs) throws IOException, InterruptedException {
+        private boolean analyzeWindow(long startMs, long endMs, boolean allowFetchRetry)
+                throws IOException, InterruptedException {
             long overlapMs = 0;
             for (SkipRule rule : rules) {
                 for (SkipSample sample : rule.samples) {
@@ -682,26 +729,43 @@ public final class SkipManager {
                     }
                 }
             }
-            long decodeStart = fetchMissing ? Math.max(0, startMs - overlapMs) : startMs;
+            boolean cacheOnlyStreaming = SkipStreamingSource.isStreaming(audioUri) && !fetchMissing;
+            long decodeStart = cacheOnlyStreaming ? startMs : Math.max(0, startMs - overlapMs);
             decodeStart -= decodeStart % SkipFingerprint.HOP_MS;
             long decodeEnd = Math.min(durationMs, endMs + overlapMs + SkipFingerprint.FRAME_MS);
             SkipAudioDecoder.DecodedAudio decoded = SkipStreamingSource.isStreaming(audioUri)
-                    ? SkipAudioDecoder.decode(context, audioUri, decodeStart, decodeEnd, fetchMissing)
-                    : SkipAudioDecoder.decode(context, audioUri, decodeStart, decodeEnd);
+                    ? decodeStreamingWindow(decodeStart, decodeEnd, allowFetchRetry)
+                    : decodeLocalWindow(decodeStart, decodeEnd);
             checkCancelled();
             if (reusableSource(audioUri) && !identity.equals(sourceIdentity(audioUri))) {
                 throw new IOException("Audio source changed during decoding");
             }
-            boolean cacheOnlyStreaming = SkipStreamingSource.isStreaming(audioUri) && !fetchMissing;
-            if ((!decoded.complete && !decoded.cacheMiss)
-                    || decoded.startMs > startMs && !cacheOnlyStreaming) {
+            long actualEnd = decoded.startMs + decoded.durationMs;
+            if (BuildConfig.DEBUG && !SkipStreamingSource.isStreaming(audioUri)) {
+                Log.d("SkipManager", "Local decoded=" + decoded.startMs + ".." + actualEnd
+                        + " complete=" + decoded.complete + " eof=" + decoded.eof);
+            }
+            if (SkipStreamingSource.isStreaming(audioUri)
+                    && (!decoded.complete && !decoded.cacheMiss
+                    || decoded.startMs > startMs && !cacheOnlyStreaming)) {
+                throw new SkipStreamingSource.UnavailableException(
+                        "Audio window has incomplete decoder coverage");
+            }
+            if (decoded.startMs > startMs && !cacheOnlyStreaming) {
                 if (SkipStreamingSource.isStreaming(audioUri)) {
                     throw new SkipStreamingSource.UnavailableException(
-                            "Audio window has incomplete decoder coverage");
+                            "Audio window starts after requested analysis range");
                 }
-                throw new IOException("Audio window has incomplete decoder coverage");
+                throw new IOException("Audio window starts after requested analysis range");
             }
-            long actualEnd = decoded.startMs + decoded.durationMs;
+            if (decoded.eof && decoded.samples.length == 0) {
+                if (endMs - startMs > SkipFingerprint.HOP_MS) {
+                    throw new IOException("Audio decoder produced no samples in requested window");
+                }
+                coverage = mergeCoverage(coverage,
+                        Collections.singletonList(new SkipCoverage(startMs, Math.min(endMs, durationMs))));
+                return false;
+            }
             if (decoded.eof) {
                 durationMs = Math.min(durationMs, actualEnd);
                 List<SkipCoverage> trimmed = new ArrayList<>();
@@ -731,21 +795,54 @@ public final class SkipManager {
                 }
                 throw new IOException("Audio window made no analysis progress");
             }
+            if (!SkipStreamingSource.isStreaming(audioUri) && isCoveredFrom(coverage, coveredStart, safeEnd)) {
+                throw new IOException("Audio window made no analysis progress");
+            }
             if (decoded.samples.length >= SkipFingerprint.SAMPLE_RATE * SkipFingerprint.FRAME_MS / 1_000) {
                 AudioFingerprint target = SkipFingerprint.fromPcm(decoded.samples, SkipFingerprint.SAMPLE_RATE);
                 List<SkipMarkerHit> newHits = new ArrayList<>();
                 for (SkipRule rule : rules) {
                     for (SkipSample sample : rule.samples) {
                         if (rule.useStartAsEnd && sample.marker == SkipMarker.END) {
+                            if (BuildConfig.DEBUG && Log.isLoggable(MATCH_TAG, Log.DEBUG)) {
+                                Log.d(MATCH_TAG, "window=" + startMs + ".." + endMs + " rule=" + rule.id
+                                        + " sample=" + sample.id + " marker=END result=filtered-use-start-as-end");
+                            }
                             continue;
                         }
                         checkCancelled();
-                        for (SkipFingerprint.Match match : SkipFingerprint.findMatches(sample.fingerprint, target,
-                                decoded.startMs, 0.82f)) {
-                            if (match.startMs >= coveredStart && match.startMs < safeEnd
-                                    && match.startMs + sample.durationMs <= actualEnd + 1) {
+                        List<SkipFingerprint.Match> matches = SkipFingerprint.findMatches(sample.fingerprint, target,
+                                decoded.startMs, 0.82f);
+                        if (BuildConfig.DEBUG && Log.isLoggable(MATCH_TAG, Log.DEBUG)) {
+                            SkipFingerprint.MatchDetails details = SkipFingerprint.findBestMatchDetails(
+                                    sample.fingerprint, target, decoded.startMs);
+                            SkipFingerprint.Match best = details == null ? null : details.match;
+                            Log.d(MATCH_TAG, "window=" + startMs + ".." + endMs + " decoded="
+                                    + decoded.startMs + ".." + actualEnd + " rule=" + rule.id + " sample="
+                                    + sample.id + " marker=" + sample.marker + " best=" + formatMatch(best)
+                                    + " threshold=0.82 candidates=" + matches.size() + " "
+                                    + formatDetails(details) + " " + formatPcm(decoded.samples));
+                            if (best != null && best.score >= 0.7f) {
+                                Log.d(MATCH_TAG, "phase-sweep rule=" + rule.id + " sample=" + sample.id + " "
+                                        + phaseSweep(sample.fingerprint, decoded));
+                            }
+                        }
+                        for (SkipFingerprint.Match match : matches) {
+                            boolean inRange = match.startMs >= coveredStart && match.startMs < safeEnd;
+                            boolean fitsAudio = match.startMs + sample.durationMs <= actualEnd + 1;
+                            if (inRange && fitsAudio) {
                                 newHits.add(new SkipMarkerHit(rule.id, sample.id, sample.marker,
                                         match.startMs, match.score));
+                                if (BuildConfig.DEBUG && Log.isLoggable(MATCH_TAG, Log.DEBUG)) {
+                                    Log.d(MATCH_TAG, "accepted rule=" + rule.id + " sample=" + sample.id
+                                            + " marker=" + sample.marker + " start=" + match.startMs
+                                            + " score=" + match.score);
+                                }
+                            } else if (BuildConfig.DEBUG && Log.isLoggable(MATCH_TAG, Log.DEBUG)) {
+                                Log.d(MATCH_TAG, "rejected rule=" + rule.id + " sample=" + sample.id
+                                        + " marker=" + sample.marker + " start=" + match.startMs
+                                        + " score=" + match.score + " reason="
+                                        + (!inRange ? "outside-search-range" : "sample-overruns-audio"));
                             }
                         }
                     }
@@ -754,6 +851,191 @@ public final class SkipManager {
             }
             coverage = mergeCoverage(coverage, Collections.singletonList(new SkipCoverage(coveredStart, safeEnd)));
             return decoded.cacheMiss || coveredStart > startMs;
+        }
+
+        private SkipAudioDecoder.DecodedAudio decodeLocalWindow(long startMs, long endMs)
+                throws IOException, InterruptedException {
+            SkipAudioDecoder.DecodedAudio decoded = decodeSession(startMs, endMs);
+            for (int retry = 0; retry < LOCAL_DECODE_RETRIES
+                    && (!decoded.complete || decoded.startMs > startMs); retry++) {
+                checkCancelled();
+                long retryStart = decoded.startMs > startMs
+                        ? Math.max(0, startMs - LOCAL_SEEK_FALLBACK_MS) : startMs;
+                SkipAudioDecoder.DecodedAudio retryResult;
+                try {
+                    retryResult = decodeSession(retryStart, endMs);
+                } catch (IOException error) {
+                    if (decoded.startMs <= startMs && decoded.durationMs > 0) {
+                        return decoded;
+                    }
+                    throw error;
+                }
+                if (retryResult.complete || retryResult.startMs > startMs
+                        || retryResult.durationMs >= decoded.durationMs) {
+                    decoded = retryResult;
+                }
+            }
+            return decoded;
+        }
+
+        private String formatMatch(SkipFingerprint.Match match) {
+            return match == null ? "none" : match.startMs + ":" + match.score;
+        }
+
+        private String formatDetails(SkipFingerprint.MatchDetails details) {
+            if (details == null) {
+                return "frames=none";
+            }
+            StringBuilder segments = new StringBuilder();
+            for (int index = 0; index < details.segmentDistance.length; index++) {
+                if (index > 0) {
+                    segments.append(',');
+                }
+                int frames = details.segmentFrames[index];
+                float score = frames == 0 ? 0 : 1f - details.segmentDistance[index] / (float) (frames * 32);
+                segments.append(score);
+            }
+            return "activeFrames=" + details.activeFrames + " mismatchingFrames="
+                    + details.mismatchingFrames + " distance=" + details.distance + " segmentScores=" + segments;
+        }
+
+        private String formatPcm(float[] pcm) {
+            double energy = 0;
+            float peak = 0;
+            int firstAudible = -1;
+            for (int index = 0; index < pcm.length; index++) {
+                float value = pcm[index];
+                energy += value * value;
+                peak = Math.max(peak, Math.abs(value));
+                if (firstAudible < 0 && Math.abs(value) >= 0.004f) {
+                    firstAudible = index;
+                }
+            }
+            double rms = pcm.length == 0 ? 0 : Math.sqrt(energy / pcm.length);
+            return "pcmSamples=" + pcm.length + " rms=" + rms + " peak=" + peak
+                    + " firstAudibleMs=" + (firstAudible < 0 ? -1 : firstAudible * 1_000L
+                    / SkipFingerprint.SAMPLE_RATE);
+        }
+
+        private String phaseSweep(AudioFingerprint sample, SkipAudioDecoder.DecodedAudio decoded) {
+            StringBuilder result = new StringBuilder();
+            for (int phaseMs = 0; phaseMs < SkipFingerprint.HOP_MS; phaseMs += 4) {
+                int offset = phaseMs * SkipFingerprint.SAMPLE_RATE / 1_000;
+                if (decoded.samples.length - offset < SkipFingerprint.SAMPLE_RATE
+                        * SkipFingerprint.FRAME_MS / 1_000) {
+                    break;
+                }
+                float[] shifted = new float[decoded.samples.length - offset];
+                System.arraycopy(decoded.samples, offset, shifted, 0, shifted.length);
+                SkipFingerprint.Match match = SkipFingerprint.findBestMatch(sample,
+                        SkipFingerprint.fromPcm(shifted, SkipFingerprint.SAMPLE_RATE),
+                        decoded.startMs + phaseMs);
+                if (result.length() > 0) {
+                    result.append(',');
+                }
+                result.append(phaseMs).append('=').append(formatMatch(match));
+            }
+            return result.toString();
+        }
+
+        private SkipAudioDecoder.DecodedAudio decodeStreamingWindow(long startMs, long endMs,
+                                                                      boolean allowFetchRetry)
+                throws IOException, InterruptedException {
+            try {
+                return decodeSession(startMs, endMs);
+            } catch (SkipStreamingSource.CacheMissException error) {
+                if (BuildConfig.DEBUG) {
+                    Log.d("SkipManager", "Cache miss source=" + audioUri + " window=" + startMs + ".."
+                            + endMs + " retry=" + allowFetchRetry + " error=" + error.getMessage());
+                }
+                if (!allowFetchRetry || error.getMessage() == null
+                        || !error.getMessage().contains("during extractor initialization")) {
+                    throw error;
+                }
+                try {
+                    if (BuildConfig.DEBUG) {
+                        Log.d("SkipManager", "Retrying cache miss with bounded fetch source=" + audioUri
+                                + " window=" + startMs + ".." + endMs);
+                    }
+                    try (SkipAudioDecoder.Session fetchSession =
+                                 SkipAudioDecoder.openSession(context, audioUri, true, true)) {
+                        return fetchSession.decode(startMs, endMs);
+                    }
+                } catch (SkipStreamingSource.UnavailableException fetchError) {
+                    fetchError.addSuppressed(error);
+                    if (BuildConfig.DEBUG) {
+                        Log.d("SkipManager", "Bounded fetch failed source=" + audioUri + " window="
+                                + startMs + ".." + endMs, fetchError);
+                    }
+                    throw fetchError;
+                }
+            }
+        }
+
+        private SkipAudioDecoder.Session decoderSession() throws IOException {
+            while (true) {
+                SkipAudioDecoder.Session evicted;
+                synchronized (SkipManager.this) {
+                    if (decoderSession != null) {
+                        return decoderSession;
+                    }
+                    if (decoderSessionOwners.size() < MAX_RETAINED_DECODER_SESSIONS) {
+                        decoderSession = SkipAudioDecoder.openSession(context, audioUri, fetchMissing, false);
+                        decoderSessionOwners.add(this);
+                        return decoderSession;
+                    }
+                    AnalysisJob owner = null;
+                    for (AnalysisJob candidate : decoderSessionOwners) {
+                        if (!candidate.running) {
+                            owner = candidate;
+                            break;
+                        }
+                    }
+                    if (owner == null) {
+                        throw new IllegalStateException("No decoder session is available");
+                    }
+                    evicted = owner.detachDecoderSessionLocked();
+                }
+                if (evicted != null) {
+                    evicted.close();
+                }
+            }
+        }
+
+        private SkipAudioDecoder.DecodedAudio decodeSession(long startMs, long endMs)
+                throws IOException, InterruptedException {
+            try {
+                return decoderSession().decode(startMs, endMs);
+            } catch (IOException | InterruptedException | RuntimeException error) {
+                closeDecoderSession();
+                throw error;
+            }
+        }
+
+        private void cancelDecoderSession() {
+            if (running) {
+                return;
+            }
+            closeDecoderSession();
+        }
+
+        private void closeDecoderSession() {
+            SkipAudioDecoder.Session session;
+            synchronized (SkipManager.this) {
+                session = detachDecoderSessionLocked();
+            }
+            if (session != null) {
+                session.close();
+            }
+        }
+
+        private SkipAudioDecoder.Session detachDecoderSessionLocked() {
+            SkipAudioDecoder.Session session = decoderSession;
+            if (session != null) {
+                decoderSession = null;
+                decoderSessionOwners.remove(this);
+            }
+            return session;
         }
 
         private void checkCancelled() throws InterruptedException {
@@ -776,12 +1058,22 @@ public final class SkipManager {
         }
 
         private void emit(SkipAnalysisStatus status, String error) {
+            if (status != SkipAnalysisStatus.ANALYZING) {
+                closeDecoderSession();
+            }
             synchronized (SkipManager.this) {
                 if (task.isCancellationRequested() || (callback == null && jobs.get(key) != this)) {
                     return;
                 }
-                Resolution resolution = error == null ? resolveAll(rules, hits, durationMs, coverage)
+                Resolution resolution = error == null || status == SkipAnalysisStatus.WAITING_FOR_AUDIO
+                        ? resolveAll(rules, hits, durationMs, coverage)
                         : Resolution.EMPTY;
+                if (BuildConfig.DEBUG && Log.isLoggable(MATCH_TAG, Log.DEBUG)) {
+                    for (SkipOccurrence occurrence : resolution.occurrences) {
+                        Log.d(MATCH_TAG, "occurrence rule=" + occurrence.ruleId + " range="
+                                + occurrence.startMs + ".." + occurrence.endMs + " score=" + occurrence.score);
+                    }
+                }
                 SkipAnalysisSnapshot snapshot = new SkipAnalysisSnapshot(feedId, episodeId, status, revision,
                         identity, durationMs, coverage, resolution.occurrences, resolution.detections,
                         error, System.currentTimeMillis());

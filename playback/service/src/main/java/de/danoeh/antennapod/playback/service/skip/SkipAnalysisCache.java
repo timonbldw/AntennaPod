@@ -14,7 +14,7 @@ import java.util.Collections;
 import java.util.List;
 
 final class SkipAnalysisCache {
-    private static final int VERSION = 2;
+    private static final int VERSION = 4;
     private final File directory;
 
     SkipAnalysisCache(File cacheDirectory) {

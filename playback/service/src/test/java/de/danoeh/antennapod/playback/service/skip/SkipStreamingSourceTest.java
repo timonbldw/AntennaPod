@@ -8,11 +8,14 @@ import androidx.media3.database.StandaloneDatabaseProvider;
 import androidx.media3.datasource.ByteArrayDataSource;
 import androidx.media3.datasource.DataSource;
 import androidx.media3.datasource.DataSpec;
+import androidx.media3.datasource.DefaultDataSource;
 import androidx.media3.datasource.TransferListener;
 import androidx.media3.datasource.cache.CacheSpan;
 import androidx.media3.datasource.cache.ContentMetadataMutations;
 import androidx.media3.datasource.cache.NoOpCacheEvictor;
 import androidx.media3.datasource.cache.SimpleCache;
+import androidx.media3.extractor.DefaultExtractorsFactory;
+import androidx.media3.inspector.MediaExtractorCompat;
 import androidx.test.core.app.ApplicationProvider;
 import org.junit.After;
 import org.junit.Before;
@@ -24,6 +27,7 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InterruptedIOException;
+import java.io.RandomAccessFile;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -115,6 +119,173 @@ public class SkipStreamingSourceTest {
     }
 
     @Test
+    public void repeatedPacketReadsReuseCachedFileWithinFragment() throws Exception {
+        SkipStreamingSource.Registration registration = SkipStreamingSource.register(
+                cache, Uri.parse("https://example.com/audio.mp3"));
+        byte[] cached = new byte[65_536];
+        cache.applyContentMetadataMutations(registration.cacheKey,
+                ContentMetadataMutations.setContentLength(new ContentMetadataMutations(), cached.length));
+        writeCache(registration.cacheKey, cached);
+        CountingCachedFileOpener opener = new CountingCachedFileOpener();
+        SkipStreamingSource.CachedMediaDataSource source = SkipStreamingSource.open(registration.uri);
+        source.setCachedFileOpener(opener);
+
+        byte[] packet = new byte[366];
+        for (int position = 0; position + packet.length <= cached.length; position += packet.length) {
+            assertEquals(packet.length, source.readAt(position, packet, 0, packet.length));
+        }
+        assertEquals(packet.length, source.readAt(1_000, packet, 0, packet.length));
+        assertEquals(1, opener.opens.get());
+        assertEquals(0, opener.closes.get());
+
+        source.close();
+        assertEquals(1, opener.closes.get());
+    }
+
+    @Test
+    public void fragmentTransitionClosesAndOpensCachedFile() throws Exception {
+        SkipStreamingSource.Registration registration = SkipStreamingSource.register(
+                cache, Uri.parse("https://example.com/audio.mp3"));
+        cache.applyContentMetadataMutations(registration.cacheKey,
+                ContentMetadataMutations.setContentLength(new ContentMetadataMutations(), 131_072));
+        writeCache(registration.cacheKey, new byte[65_536]);
+        writeCache(registration.cacheKey, 65_536, new byte[65_536]);
+        CountingCachedFileOpener opener = new CountingCachedFileOpener();
+        try (SkipStreamingSource.CachedMediaDataSource source = SkipStreamingSource.open(registration.uri)) {
+            source.setCachedFileOpener(opener);
+            assertEquals(1, source.readAt(0, new byte[1], 0, 1));
+            assertEquals(1, source.readAt(65_536, new byte[1], 0, 1));
+            assertEquals(2, opener.opens.get());
+            assertEquals(1, opener.closes.get());
+        }
+        assertEquals(2, opener.closes.get());
+    }
+
+    @Test
+    public void cacheHoleClosesFileAndLaterAvailableSpanReopens() throws Exception {
+        SkipStreamingSource.Registration registration = SkipStreamingSource.register(
+                cache, Uri.parse("https://example.com/audio.mp3"));
+        cache.applyContentMetadataMutations(registration.cacheKey,
+                ContentMetadataMutations.setContentLength(new ContentMetadataMutations(), 131_072));
+        writeCache(registration.cacheKey, new byte[65_536]);
+        CountingCachedFileOpener opener = new CountingCachedFileOpener();
+        try (SkipStreamingSource.CachedMediaDataSource source = SkipStreamingSource.open(registration.uri)) {
+            source.setCachedFileOpener(opener);
+            assertEquals(1, source.readAt(0, new byte[1], 0, 1));
+            assertEquals(0, source.readAt(65_536, new byte[1], 0, 1));
+            assertEquals(1, opener.opens.get());
+            assertEquals(1, opener.closes.get());
+
+            writeCache(registration.cacheKey, 65_536, new byte[] {7});
+            byte[] result = new byte[1];
+            assertEquals(1, source.readAt(65_536, result, 0, 1));
+            assertEquals(7, result[0]);
+            assertEquals(2, opener.opens.get());
+        }
+        assertEquals(2, opener.closes.get());
+    }
+
+    @Test
+    public void repeatedCloseClosesCachedFileOnce() throws Exception {
+        SkipStreamingSource.Registration registration = SkipStreamingSource.register(
+                cache, Uri.parse("https://example.com/audio.mp3"));
+        cache.applyContentMetadataMutations(registration.cacheKey,
+                ContentMetadataMutations.setContentLength(new ContentMetadataMutations(), 1));
+        writeCache(registration.cacheKey, new byte[] {1});
+        CountingCachedFileOpener opener = new CountingCachedFileOpener();
+        SkipStreamingSource.CachedMediaDataSource source = SkipStreamingSource.open(registration.uri);
+        source.setCachedFileOpener(opener);
+        assertEquals(1, source.readAt(0, new byte[1], 0, 1));
+
+        source.close();
+        source.close();
+
+        assertEquals(1, opener.opens.get());
+        assertEquals(1, opener.closes.get());
+    }
+
+    @Test
+    public void independentSourcesRetainIndependentCachedFiles() throws Exception {
+        SkipStreamingSource.Registration registration = SkipStreamingSource.register(
+                cache, Uri.parse("https://example.com/audio.mp3"));
+        cache.applyContentMetadataMutations(registration.cacheKey,
+                ContentMetadataMutations.setContentLength(new ContentMetadataMutations(), 1));
+        writeCache(registration.cacheKey, new byte[] {1});
+        CountingCachedFileOpener firstOpener = new CountingCachedFileOpener();
+        CountingCachedFileOpener secondOpener = new CountingCachedFileOpener();
+        SkipStreamingSource.CachedMediaDataSource first = SkipStreamingSource.open(registration.uri);
+        SkipStreamingSource.CachedMediaDataSource second = SkipStreamingSource.open(registration.uri);
+        first.setCachedFileOpener(firstOpener);
+        second.setCachedFileOpener(secondOpener);
+
+        assertEquals(1, first.readAt(0, new byte[1], 0, 1));
+        assertEquals(1, second.readAt(0, new byte[1], 0, 1));
+        first.close();
+        assertEquals(1, firstOpener.closes.get());
+        assertEquals(0, secondOpener.closes.get());
+        assertEquals(1, second.readAt(0, new byte[1], 0, 1));
+
+        second.close();
+        assertEquals(1, secondOpener.closes.get());
+    }
+
+    @Test
+    public void truncatedCachedFileClosesRetainedHandle() throws Exception {
+        SkipStreamingSource.Registration registration = SkipStreamingSource.register(
+                cache, Uri.parse("https://example.com/audio.mp3"));
+        cache.applyContentMetadataMutations(registration.cacheKey,
+                ContentMetadataMutations.setContentLength(new ContentMetadataMutations(), 4));
+        writeCache(registration.cacheKey, new byte[] {1, 2, 3, 4});
+        CountingCachedFileOpener opener = new CountingCachedFileOpener();
+        SkipStreamingSource.CachedMediaDataSource source = SkipStreamingSource.open(registration.uri);
+        source.setCachedFileOpener(opener);
+        assertEquals(1, source.readAt(0, new byte[1], 0, 1));
+        File cachedFile = cache.getCachedSpans(registration.cacheKey).first().file;
+        try (RandomAccessFile truncated = new RandomAccessFile(cachedFile, "rw")) {
+            truncated.setLength(1);
+        }
+
+        byte[] result = new byte[] {9};
+        assertEquals(0, source.readAt(1, result, 0, 1));
+        assertEquals(9, result[0]);
+        assertTrue(source.isCacheMiss());
+        try {
+            source.throwIfCacheMiss();
+            fail("Expected truncated cache to become a cache miss");
+        } catch (SkipStreamingSource.CacheMissException expected) {
+            assertEquals("Requested audio bytes are not cached at byte 1 (length 1)", expected.getMessage());
+        }
+        assertEquals(1, opener.opens.get());
+        assertEquals(1, opener.closes.get());
+        source.close();
+        assertEquals(1, opener.closes.get());
+    }
+
+    @Test
+    public void invalidationClosesCachedFileImmediately() throws Exception {
+        SkipStreamingSource.Registration registration = SkipStreamingSource.register(
+                cache, Uri.parse("https://example.com/audio.mp3"));
+        cache.applyContentMetadataMutations(registration.cacheKey,
+                ContentMetadataMutations.setContentLength(new ContentMetadataMutations(), 1));
+        writeCache(registration.cacheKey, new byte[] {1});
+        CountingCachedFileOpener opener = new CountingCachedFileOpener();
+        SkipStreamingSource.CachedMediaDataSource source = SkipStreamingSource.open(registration.uri);
+        source.setCachedFileOpener(opener);
+        assertEquals(1, source.readAt(0, new byte[1], 0, 1));
+
+        SkipStreamingSource.release(cache);
+        assertEquals(1, opener.closes.get());
+        try {
+            source.readAt(0, new byte[1], 0, 1);
+            fail("Expected invalidated source");
+        } catch (SkipStreamingSource.UnavailableException expected) {
+            assertEquals("Streaming cache source is unavailable", expected.getMessage());
+        }
+        source.close();
+        assertEquals(1, opener.closes.get());
+    }
+
+    @Test
     public void readAcrossMissingFragmentReturnsAvailablePrefixAndRetainsMiss() throws Exception {
         SkipStreamingSource.Registration registration = SkipStreamingSource.register(
                 cache, Uri.parse("https://example.com/audio.mp3"));
@@ -183,6 +354,47 @@ public class SkipStreamingSourceTest {
                 fail("Expected unavailable cache hole side channel");
             } catch (SkipStreamingSource.UnavailableException expected) {
                 assertEquals("Requested audio bytes are not cached at byte 4 (length 3)", expected.getMessage());
+            }
+        }
+    }
+
+    @Test
+    public void extractorBridgeThrowsOnMissingSpan() throws Exception {
+        SkipStreamingSource.Registration registration = SkipStreamingSource.register(
+                cache, Uri.parse("https://example.com/audio.mp3"));
+        cache.applyContentMetadataMutations(registration.cacheKey,
+                ContentMetadataMutations.setContentLength(new ContentMetadataMutations(), 8));
+
+        try (SkipStreamingSource.CachedMediaDataSource source = SkipStreamingSource.open(registration.uri)) {
+            SkipAudioDecoder.ExtractorMediaDataSource extractorSource =
+                    new SkipAudioDecoder.ExtractorMediaDataSource(source);
+            try {
+                extractorSource.readAt(4, new byte[1], 0, 1);
+                fail("Expected extractor cache miss");
+            } catch (SkipStreamingSource.CacheMissException expected) {
+                assertEquals("Requested audio bytes are not cached at byte 4 (length 1)",
+                        expected.getMessage());
+            }
+        }
+    }
+
+    @Test(timeout = 1_000)
+    public void media3ExtractorInitializationStopsAtMissingSpan() throws Exception {
+        SkipStreamingSource.Registration registration = SkipStreamingSource.register(
+                cache, Uri.parse("https://example.com/audio.mp3"));
+        cache.applyContentMetadataMutations(registration.cacheKey,
+                ContentMetadataMutations.setContentLength(new ContentMetadataMutations(), 1024));
+
+        try (SkipStreamingSource.CachedMediaDataSource source = SkipStreamingSource.open(registration.uri)) {
+            MediaExtractorCompat extractor = new MediaExtractorCompat(new DefaultExtractorsFactory(),
+                    new DefaultDataSource.Factory(ApplicationProvider.getApplicationContext()));
+            try {
+                extractor.setDataSource(new SkipAudioDecoder.ExtractorMediaDataSource(source));
+                fail("Expected extractor initialization failure");
+            } catch (IOException expected) {
+                assertTrue(source.isCacheMiss());
+            } finally {
+                extractor.release();
             }
         }
     }
@@ -393,7 +605,7 @@ public class SkipStreamingSourceTest {
     }
 
     @Test
-    public void interruptingRequestingThreadClosesInFlightUpstream() throws Exception {
+    public void interruptingReadingThreadClosesInFlightUpstream() throws Exception {
         BlockingDataSource upstream = new BlockingDataSource();
         SkipStreamingSource.Registration registration = SkipStreamingSource.register(cache,
                 Uri.parse("https://example.com/audio.mp3"), () -> upstream);
@@ -431,7 +643,7 @@ public class SkipStreamingSourceTest {
             });
             callback.start();
             assertTrue(upstream.opened.await(1, TimeUnit.SECONDS));
-            owner.interrupt();
+            callback.interrupt();
             callback.join(1_000);
             assertFalse(callback.isAlive());
             assertTrue(upstream.closed.get());
@@ -477,7 +689,38 @@ public class SkipStreamingSourceTest {
     }
 
     @Test
-    public void completedFetchWaitsForCommittedCancellation() throws Exception {
+    public void closingSourceClosesInFlightUpstreamWithoutInterruptOrInvalidation() throws Exception {
+        BlockingDataSource upstream = new BlockingDataSource();
+        SkipStreamingSource.Registration registration = SkipStreamingSource.register(cache,
+                Uri.parse("https://example.com/audio.mp3"), () -> upstream);
+        cache.applyContentMetadataMutations(registration.cacheKey,
+                ContentMetadataMutations.setContentLength(new ContentMetadataMutations(), 1));
+        SkipStreamingSource.CachedMediaDataSource source = SkipStreamingSource.open(registration.uri, true);
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        Thread reader = new Thread(() -> {
+            try {
+                source.readAt(0, new byte[1], 0, 1);
+            } catch (Throwable error) {
+                failure.set(error);
+            }
+        });
+        reader.start();
+        assertTrue(upstream.opened.await(1, TimeUnit.SECONDS));
+
+        Thread closer = new Thread(source::close);
+        closer.start();
+        reader.join(1_000);
+        closer.join(1_000);
+
+        assertFalse(reader.isAlive());
+        assertFalse(closer.isAlive());
+        assertTrue(upstream.closed.get());
+        assertTrue(failure.get() instanceof SkipStreamingSource.UnavailableException);
+        assertEquals("Streaming cache source is unavailable", failure.get().getMessage());
+    }
+
+    @Test
+    public void interruptedFetchWaitsForCommittedCancellation() throws Exception {
         BlockingCloseDataSource upstream = new BlockingCloseDataSource();
         SkipStreamingSource.Registration registration = SkipStreamingSource.register(cache,
                 Uri.parse("https://example.com/audio.mp3"), () -> upstream);
@@ -513,7 +756,7 @@ public class SkipStreamingSourceTest {
             });
             callback.start();
             assertTrue(upstream.reading.await(1, TimeUnit.SECONDS));
-            owner.interrupt();
+            callback.interrupt();
             assertTrue(upstream.closing.await(1, TimeUnit.SECONDS));
             upstream.finishRead.countDown();
             Thread.sleep(20);
@@ -537,7 +780,7 @@ public class SkipStreamingSourceTest {
     }
 
     @Test
-    public void callbackOnOtherThreadObservesRequestingThreadCancellation() throws Exception {
+    public void readRebindsCancellationFromOpeningThread() throws Exception {
         byte[] upstream = new byte[] {1};
         SkipStreamingSource.Registration registration = SkipStreamingSource.register(cache,
                 Uri.parse("https://example.com/audio.mp3"), () -> new ByteArrayDataSource(upstream));
@@ -545,16 +788,16 @@ public class SkipStreamingSourceTest {
                 ContentMetadataMutations.setContentLength(new ContentMetadataMutations(), upstream.length));
         SkipStreamingSource.CachedMediaDataSource source = SkipStreamingSource.open(registration.uri, true);
         try {
-            AtomicInteger interrupted = new AtomicInteger();
+            AtomicInteger completed = new AtomicInteger();
             AtomicBoolean start = new AtomicBoolean();
             Thread callback = new Thread(() -> {
                 while (!start.get()) {
                     Thread.yield();
                 }
                 try {
-                    source.readAt(0, new byte[1], 0, 1);
-                } catch (InterruptedIOException expected) {
-                    interrupted.incrementAndGet();
+                    if (source.readAt(0, new byte[1], 0, 1) == 1) {
+                        completed.incrementAndGet();
+                    }
                 } catch (Exception ignored) {
                 }
             });
@@ -564,10 +807,37 @@ public class SkipStreamingSourceTest {
             while (callback.isAlive()) {
                 Thread.yield();
             }
-            assertEquals(1, interrupted.get());
+            assertEquals(1, completed.get());
         } finally {
             Thread.interrupted();
             source.close();
+        }
+    }
+
+    @Test
+    public void rebindingIgnoresInterruptedPreviousOwner() throws Exception {
+        SkipStreamingSource.Registration registration = SkipStreamingSource.register(
+                cache, Uri.parse("https://example.com/audio.mp3"));
+        cache.applyContentMetadataMutations(registration.cacheKey,
+                ContentMetadataMutations.setContentLength(new ContentMetadataMutations(), 1));
+        writeCache(registration.cacheKey, new byte[] {7});
+        AtomicReference<SkipStreamingSource.CachedMediaDataSource> source = new AtomicReference<>();
+        Thread previousOwner = new Thread(() -> {
+            try {
+                source.set(SkipStreamingSource.open(registration.uri));
+                Thread.currentThread().interrupt();
+            } catch (IOException ignored) {
+            }
+        });
+        previousOwner.start();
+        previousOwner.join();
+
+        try (SkipStreamingSource.CachedMediaDataSource rebound = source.get()) {
+            rebound.bindToCurrentThread();
+            byte[] result = new byte[1];
+            assertEquals(1, rebound.readAt(0, result, 0, 1));
+            assertEquals(7, result[0]);
+            rebound.throwIfInterrupted();
         }
     }
 
@@ -608,6 +878,34 @@ public class SkipStreamingSourceTest {
             cache.commitFile(file, data.length);
         } finally {
             cache.releaseHoleSpan(hole);
+        }
+    }
+
+    private static final class CountingCachedFileOpener implements SkipStreamingSource.CachedFileOpener {
+        final AtomicInteger opens = new AtomicInteger();
+        final AtomicInteger closes = new AtomicInteger();
+
+        @Override
+        public SkipStreamingSource.CachedFile open(File source) throws IOException {
+            opens.incrementAndGet();
+            RandomAccessFile file = new RandomAccessFile(source, "r");
+            return new SkipStreamingSource.CachedFile() {
+                @Override
+                public void seek(long position) throws IOException {
+                    file.seek(position);
+                }
+
+                @Override
+                public int read(byte[] buffer, int offset, int length) throws IOException {
+                    return file.read(buffer, offset, length);
+                }
+
+                @Override
+                public void close() throws IOException {
+                    file.close();
+                    closes.incrementAndGet();
+                }
+            };
         }
     }
 
