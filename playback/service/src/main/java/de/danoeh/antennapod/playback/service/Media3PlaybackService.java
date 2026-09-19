@@ -666,6 +666,11 @@ public class Media3PlaybackService extends MediaLibraryService {
         if (!matchesSnapshotSource(skipAnalysisSource, snapshot)) {
             return;
         }
+        if (BuildConfig.DEBUG && snapshot.status == SkipAnalysisStatus.ERROR) {
+            Log.d(TAG, "Skip analysis error feed=" + skipFeedId + " episode=" + skipEpisodeId
+                    + " source=" + skipAnalysisSource + " position=" + player.getCurrentPosition()
+                    + " buffered=" + getBufferedPosition() + " error=" + snapshot.error);
+        }
         if (snapshot.status == SkipAnalysisStatus.NOT_ANALYZED) {
             skipOccurrences = Collections.emptyList();
             SkipPlaybackDecision.updateOccurrences(skipOccurrences, player.getCurrentPosition(), skipDecisionState);

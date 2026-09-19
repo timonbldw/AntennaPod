@@ -227,7 +227,9 @@ public class ChaptersFragment extends AppCompatDialogFragment {
                     : getString(R.string.audio_skip_playback_analyzing_with_skips,
                     snapshot.occurrences.size());
         } else if (snapshot.status == SkipAnalysisStatus.WAITING_FOR_AUDIO) {
-            status = snapshot.occurrences.isEmpty()
+            status = snapshot.error != null
+                    ? getString(R.string.audio_skip_playback_waiting_for_audio_details, snapshot.error)
+                    : snapshot.occurrences.isEmpty()
                     ? getString(R.string.audio_skip_playback_waiting_for_audio)
                     : getString(R.string.audio_skip_playback_waiting_with_skips,
                     snapshot.occurrences.size());
@@ -249,7 +251,9 @@ public class ChaptersFragment extends AppCompatDialogFragment {
                     : getString(R.string.audio_skip_playback_diagnostics_only,
                     snapshot.detections.size());
         } else if (snapshot.status == SkipAnalysisStatus.ERROR) {
-            status = getString(R.string.audio_skip_playback_error);
+            status = snapshot.error == null
+                    ? getString(R.string.audio_skip_playback_error)
+                    : getString(R.string.audio_skip_playback_error_details, snapshot.error);
         } else {
             status = getString(R.string.audio_skip_playback_not_analyzed);
         }
@@ -260,6 +264,7 @@ public class ChaptersFragment extends AppCompatDialogFragment {
             View row = getLayoutInflater().inflate(R.layout.skip_analysis_row, skipAnalysisRows, false);
             TextView rule = row.findViewById(R.id.skipAnalysisRule);
             TextView range = row.findViewById(R.id.skipAnalysisRange);
+            TextView quality = row.findViewById(R.id.skipAnalysisMatchQuality);
             Button listen = row.findViewById(R.id.skipAnalysisListen);
             Button jump = row.findViewById(R.id.skipAnalysisJump);
             String ruleName = occurrence.ruleId;
@@ -273,7 +278,11 @@ public class ChaptersFragment extends AppCompatDialogFragment {
             String end = formatTime(occurrence.endMs);
             rule.setText(getString(R.string.audio_skip_playback_rule, ruleName));
             range.setText(getString(R.string.audio_skip_playback_range, start, end));
-            row.setContentDescription(getString(R.string.audio_skip_playback_detected_accessibility, start, end));
+            quality.setText(getString(R.string.audio_skip_playback_match_quality,
+                    Math.round(occurrence.score * 100)));
+            row.setContentDescription(getString(
+                    R.string.audio_skip_playback_detected_with_quality_accessibility,
+                    start, end, Math.round(occurrence.score * 100)));
             listen.setOnClickListener(v -> seekTo(occurrence.startMs, true));
             jump.setOnClickListener(v -> seekTo(occurrence.endMs, false));
             skipAnalysisRows.addView(row);

@@ -2,6 +2,7 @@ package de.danoeh.antennapod.playback.service.skip;
 
 import android.media.MediaDataSource;
 import android.net.Uri;
+import android.util.Log;
 import androidx.annotation.OptIn;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.datasource.DataSource;
@@ -13,10 +14,13 @@ import androidx.media3.datasource.cache.CacheDataSource;
 import androidx.media3.datasource.cache.CacheSpan;
 import androidx.media3.datasource.cache.ContentMetadata;
 import androidx.media3.datasource.cache.SimpleCache;
+import de.danoeh.antennapod.playback.service.BuildConfig;
 
+import java.io.File;
 import java.io.IOException;
 import java.io.InterruptedIOException;
 import java.io.RandomAccessFile;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -26,10 +30,12 @@ import java.util.UUID;
 public final class SkipStreamingSource {
     private static final String SCHEME = "skip-cache";
     private static final long MAX_FETCH_BYTES = 8 * 1024 * 1024;
+    static final long ANALYSIS_FETCH_BYTES = 2 * 1024 * 1024;
     private static final int HTTP_SKIP_BUFFER_SIZE = 4096;
     private static final long CACHE_FRAGMENT_SIZE = 64 * 1024;
     private static final int MIN_FETCH_SIZE = 64 * 1024;
     private static final Object LOCK = new Object();
+    private static final String TAG = "SkipStreamingSource";
     private static final Map<Uri, Source> PLAYBACK_SOURCES = new HashMap<>();
     private static final Map<Uri, Source> SYNTHETIC_SOURCES = new HashMap<>();
 
@@ -69,7 +75,7 @@ public final class SkipStreamingSource {
                 return new Registration(previous.syntheticUri, previous.cacheKey);
             }
             if (previous != null) {
-                previous.available = false;
+                previous.invalidate();
                 SYNTHETIC_SOURCES.remove(previous.syntheticUri);
             }
             String id = UUID.randomUUID().toString();
@@ -92,7 +98,7 @@ public final class SkipStreamingSource {
             if (source.cache != cache) {
                 return false;
             }
-            source.available = false;
+            source.invalidate();
             SYNTHETIC_SOURCES.remove(source.syntheticUri);
             return true;
         });
@@ -110,12 +116,18 @@ public final class SkipStreamingSource {
         return open(syntheticUri, true, Long.MAX_VALUE);
     }
 
+    static CachedMediaDataSource openForAnalysis(Uri syntheticUri) throws UnavailableException {
+        debug("open analysis source=" + syntheticUri + " budget=" + ANALYSIS_FETCH_BYTES);
+        return open(syntheticUri, true, ANALYSIS_FETCH_BYTES);
+    }
+
     private static CachedMediaDataSource open(Uri syntheticUri, boolean fetchMissing, long fetchBudget)
             throws UnavailableException {
         Source source;
         synchronized (LOCK) {
             source = SYNTHETIC_SOURCES.get(syntheticUri);
             if (source == null || !source.available) {
+                debug("open unavailable source=" + syntheticUri);
                 throw new UnavailableException("Streaming cache source is unavailable");
             }
         }
@@ -126,9 +138,11 @@ public final class SkipStreamingSource {
             throw new UnavailableException("Streaming cache is unavailable", e);
         }
         if (size < 0) {
+            debug("open missing content length source=" + syntheticUri);
             throw new UnavailableException("Streaming source size is unavailable");
         }
         if (fetchMissing && source.upstreamFactory == null) {
+            debug("open missing upstream source=" + syntheticUri);
             throw new UnavailableException("Streaming source cannot fetch audio bytes");
         }
         return new CachedMediaDataSource(source, size, fetchMissing, fetchBudget, Thread.currentThread());
@@ -154,12 +168,18 @@ public final class SkipStreamingSource {
         }
     }
 
+    public static final class CacheMissException extends UnavailableException {
+        public CacheMissException(String message) {
+            super(message);
+        }
+    }
+
     static final class CachedMediaDataSource extends MediaDataSource {
         private final Source source;
         private final long size;
         private final boolean fetchMissing;
         private final long fetchBudget;
-        private final Thread requestingThread;
+        private volatile Thread requestingThread;
         private volatile UnavailableException failure;
         private volatile boolean failureIsTailCacheMiss;
         private volatile boolean cacheMiss;
@@ -171,29 +191,46 @@ public final class SkipStreamingSource {
         private volatile boolean interrupted;
         private long fetchedBytes;
         private volatile boolean closed;
+        private CachedFile cachedFile;
+        private CacheSpan cachedSpan;
+        private CachedFileOpener cachedFileOpener = DefaultCachedFile::new;
 
         private CachedMediaDataSource(Source source, long size, boolean fetchMissing, long fetchBudget,
-                                      Thread requestingThread) {
+                                       Thread requestingThread) {
             this.source = source;
             this.size = size;
             this.fetchMissing = fetchMissing;
             this.fetchBudget = fetchBudget;
             this.requestingThread = requestingThread;
+            source.add(this);
+        }
+
+        void bindToCurrentThread() {
+            requestingThread = Thread.currentThread();
+            interrupted = false;
+        }
+
+        synchronized void setCachedFileOpener(CachedFileOpener cachedFileOpener) {
+            this.cachedFileOpener = cachedFileOpener;
         }
 
         @Override
         public int readAt(long position, byte[] buffer, int offset, int requestedSize) throws IOException {
+            bindToCurrentThread();
             if (position < 0 || offset < 0 || requestedSize < 0 || offset + requestedSize > buffer.length) {
                 throw new IllegalArgumentException("Invalid read range");
             }
-            if (requestingThread.isInterrupted()) {
+            Thread owner = requestingThread;
+            if (owner.isInterrupted()) {
                 interrupted = true;
                 throw new InterruptedIOException("Audio clip capture was interrupted");
             }
             if (closed) {
+                closeCachedFile();
                 throw unavailable("Streaming cache source is closed", null);
             }
             if (!source.available) {
+                closeCachedFile();
                 throw unavailable("Streaming cache source is unavailable", null);
             }
             if (position >= size) {
@@ -227,12 +264,18 @@ public final class SkipStreamingSource {
         private synchronized int readSpan(long position, byte[] buffer, int offset, int readSize)
                 throws IOException {
             if (!source.available || closed) {
+                closeCachedFile();
                 throw unavailable("Streaming cache source is unavailable", null);
             }
-            if (requestingThread.isInterrupted()) {
+            Thread owner = requestingThread;
+            if (owner.isInterrupted()) {
                 interrupted = true;
                 throw new InterruptedIOException("Audio clip capture was interrupted");
             }
+            if (canReuseCachedFile(position)) {
+                return readCachedFile(position, buffer, offset, readSize);
+            }
+            closeCachedFile();
             CacheSpan span;
             try {
                 if (source.cache.getCachedLength(source.cacheKey, position, readSize) <= 0) {
@@ -255,22 +298,65 @@ public final class SkipStreamingSource {
                 throw unavailableCacheMiss(position, readSize);
             }
             int available = (int) Math.min(readSize, span.position + span.length - position);
-            try (RandomAccessFile file = new RandomAccessFile(span.file, "r")) {
-                file.seek(position - span.position);
-                int read = file.read(buffer, offset, available);
+            try {
+                cachedFile = cachedFileOpener.open(span.file);
+                cachedSpan = span;
+                return readCachedFile(position, buffer, offset, available);
+            } catch (UnavailableException e) {
+                throw e;
+            } catch (IOException | RuntimeException e) {
+                closeCachedFile();
+                throw unavailable("Cached audio bytes are unavailable", e);
+            }
+        }
+
+        private boolean canReuseCachedFile(long position) throws IOException {
+            if (cachedFile == null || cachedSpan == null || cachedSpan.file == null
+                    || position < cachedSpan.position || position >= cachedSpan.position + cachedSpan.length) {
+                return false;
+            }
+            try {
+                return cachedSpan.file.length() >= cachedSpan.length;
+            } catch (RuntimeException e) {
+                closeCachedFile();
+                throw unavailable("Cached audio bytes are unavailable", e);
+            }
+        }
+
+        private int readCachedFile(long position, byte[] buffer, int offset, int readSize) throws IOException {
+            int available = (int) Math.min(readSize, cachedSpan.position + cachedSpan.length - position);
+            try {
+                cachedFile.seek(position - cachedSpan.position);
+                int read = cachedFile.read(buffer, offset, available);
                 if (read <= 0) {
+                    closeCachedFile();
                     throw unavailable("Cached audio bytes are unavailable", null);
                 }
                 return read;
             } catch (UnavailableException e) {
                 throw e;
             } catch (IOException | RuntimeException e) {
+                closeCachedFile();
                 throw unavailable("Cached audio bytes are unavailable", e);
+            }
+        }
+
+        private synchronized void closeCachedFile() {
+            CachedFile file = cachedFile;
+            cachedFile = null;
+            cachedSpan = null;
+            if (file != null) {
+                try {
+                    file.close();
+                } catch (IOException ignored) {
+                }
             }
         }
 
         private int fetchSpan(long position, byte[] buffer, int offset, int readSize) throws IOException {
             if (fetchedBytes >= fetchBudget) {
+                debug("fetch budget exhausted position=" + position + " requested=" + readSize
+                        + " transferred=" + fetchedBytes + " budget=" + fetchBudget);
                 throw unavailable("Audio clip fetch limit exceeded", null);
             }
             long cachedLength;
@@ -283,6 +369,7 @@ public final class SkipStreamingSource {
                 return readSpan(position, buffer, offset, readSize);
             }
             if (cachedLength == 0) {
+                debug("fetch cache hole unavailable position=" + position + " requested=" + readSize);
                 throw unavailable("Requested audio bytes are unavailable", null);
             }
             int fetchSize = (int) Math.min(Math.min(Math.max(readSize, MIN_FETCH_SIZE),
@@ -303,7 +390,9 @@ public final class SkipStreamingSource {
                     .setLength(fetchSize)
                     .setFlags(DataSpec.FLAG_ALLOW_CACHE_FRAGMENTATION)
                     .build();
-            FetchCancellation cancellation = new FetchCancellation(upstream);
+            debug("fetch start position=" + position + " requested=" + fetchSize
+                    + " transferred=" + fetchedBytes + " budget=" + fetchBudget);
+            FetchCancellation cancellation = new FetchCancellation(upstream, requestingThread);
             try {
                 cancellation.start();
                 dataSource.open(dataSpec);
@@ -318,15 +407,18 @@ public final class SkipStreamingSource {
                 }
                 fetchedBytes += upstream.getTransferredBytes();
                 if (upstream.isBudgetExceeded()) {
+                    debug("fetch budget exceeded position=" + position + " transferred="
+                            + upstream.getTransferredBytes() + " budget=" + fetchBudget);
                     throw unavailable("Audio clip fetch limit exceeded", null);
                 }
                 if (totalRead == 0) {
+                    debug("fetch returned no bytes position=" + position + " requested=" + fetchSize);
                     throw unavailable("Requested audio bytes are unavailable", null);
                 }
                 if (!source.available) {
                     throw unavailable("Streaming cache source is unavailable", null);
                 }
-                if (requestingThread.isInterrupted()) {
+                if (cancellation.owner.isInterrupted()) {
                     interrupted = true;
                     throw new InterruptedIOException("Audio clip capture was interrupted");
                 }
@@ -338,6 +430,8 @@ public final class SkipStreamingSource {
             } catch (IOException | RuntimeException e) {
                 fetchedBytes += upstream.takeTransferredBytes();
                 if (upstream.isBudgetExceeded()) {
+                    debug("fetch failed at budget position=" + position + " transferred="
+                            + upstream.getTransferredBytes() + " budget=" + fetchBudget, e);
                     throw unavailable("Audio clip fetch limit exceeded", e);
                 }
                 if (cancellation.isCancelled()) {
@@ -348,6 +442,7 @@ public final class SkipStreamingSource {
                     }
                     throw unavailable("Streaming cache source is unavailable", e);
                 }
+                debug("fetch failed position=" + position + " requested=" + fetchSize, e);
                 throw unavailable("Unable to fetch audio bytes", e);
             } finally {
                 cancellation.stop();
@@ -366,19 +461,27 @@ public final class SkipStreamingSource {
         @Override
         public void close() {
             closed = true;
+            closeCachedFile();
+            source.remove(this);
+        }
+
+        synchronized void invalidate() {
+            closeCachedFile();
         }
 
         private final class FetchCancellation implements Runnable {
             private final DataSource upstream;
             private final Thread callbackThread;
+            private final Thread owner;
             private boolean stopped;
             private boolean cancelling;
             private boolean cancelled;
             private boolean interrupted;
             private Thread thread;
 
-            private FetchCancellation(DataSource upstream) {
+            private FetchCancellation(DataSource upstream, Thread owner) {
                 this.upstream = upstream;
+                this.owner = owner;
                 callbackThread = Thread.currentThread();
             }
 
@@ -391,14 +494,15 @@ public final class SkipStreamingSource {
             @Override
             public void run() {
                 while (true) {
-                    boolean requestingThreadInterrupted = requestingThread.isInterrupted();
+                    boolean requestingThreadInterrupted = owner.isInterrupted();
                     synchronized (this) {
                         if (stopped) {
                             return;
                         }
-                        if (requestingThreadInterrupted || closed || !source.available) {
+                        if ((requestingThread == owner && requestingThreadInterrupted)
+                                || closed || !source.available) {
                             interrupted = requestingThreadInterrupted;
-                            if (requestingThreadInterrupted) {
+                            if (requestingThreadInterrupted && requestingThread == owner) {
                                 CachedMediaDataSource.this.interrupted = true;
                             }
                             cancelling = true;
@@ -521,8 +625,16 @@ public final class SkipStreamingSource {
                 missingPosition = position;
                 missingLength = length;
                 missingPhase = decoderPhase;
+                debug("cache miss position=" + position + " length=" + length
+                        + " phase=" + decoderPhase);
             }
             return exception;
+        }
+
+        String diagnostics() {
+            return "phase=" + decoderPhase + " cacheMiss=" + cacheMiss + " missingPosition="
+                    + missingPosition + " missingLength=" + missingLength + " missingPhase=" + missingPhase
+                    + " transferred=" + fetchedBytes + " budget=" + fetchBudget;
         }
 
         private UnavailableException cacheMissException(long position, int length, String phase) {
@@ -531,7 +643,42 @@ public final class SkipStreamingSource {
             if (phase != null) {
                 message += " during " + phase;
             }
-            return new UnavailableException(message);
+            return new CacheMissException(message);
+        }
+    }
+
+    interface CachedFileOpener {
+        CachedFile open(File file) throws IOException;
+    }
+
+    interface CachedFile {
+        void seek(long position) throws IOException;
+
+        int read(byte[] buffer, int offset, int length) throws IOException;
+
+        void close() throws IOException;
+    }
+
+    private static final class DefaultCachedFile implements CachedFile {
+        private final RandomAccessFile file;
+
+        private DefaultCachedFile(File file) throws IOException {
+            this.file = new RandomAccessFile(file, "r");
+        }
+
+        @Override
+        public void seek(long position) throws IOException {
+            file.seek(position);
+        }
+
+        @Override
+        public int read(byte[] buffer, int offset, int length) throws IOException {
+            return file.read(buffer, offset, length);
+        }
+
+        @Override
+        public void close() throws IOException {
+            file.close();
         }
     }
 
@@ -645,6 +792,18 @@ public final class SkipStreamingSource {
         }
     }
 
+    private static void debug(String message) {
+        if (BuildConfig.DEBUG) {
+            Log.d(TAG, message);
+        }
+    }
+
+    private static void debug(String message, Throwable error) {
+        if (BuildConfig.DEBUG) {
+            Log.d(TAG, message, error);
+        }
+    }
+
     private static final class Source {
         final SimpleCache cache;
         final Uri playbackUri;
@@ -652,6 +811,7 @@ public final class SkipStreamingSource {
         final String cacheKey;
         volatile DataSource.Factory upstreamFactory;
         volatile boolean available = true;
+        private final List<CachedMediaDataSource> openDataSources = new ArrayList<>();
 
         private Source(SimpleCache cache, Uri playbackUri, Uri syntheticUri, String cacheKey,
                        DataSource.Factory upstreamFactory) {
@@ -660,6 +820,28 @@ public final class SkipStreamingSource {
             this.syntheticUri = syntheticUri;
             this.cacheKey = cacheKey;
             this.upstreamFactory = upstreamFactory;
+        }
+
+        private synchronized void add(CachedMediaDataSource dataSource) {
+            if (available) {
+                openDataSources.add(dataSource);
+            }
+        }
+
+        private synchronized void remove(CachedMediaDataSource dataSource) {
+            openDataSources.remove(dataSource);
+        }
+
+        private void invalidate() {
+            List<CachedMediaDataSource> dataSources;
+            synchronized (this) {
+                available = false;
+                dataSources = new ArrayList<>(openDataSources);
+                openDataSources.clear();
+            }
+            for (CachedMediaDataSource dataSource : dataSources) {
+                dataSource.invalidate();
+            }
         }
     }
 }

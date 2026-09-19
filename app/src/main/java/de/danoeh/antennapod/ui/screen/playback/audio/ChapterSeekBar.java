@@ -106,9 +106,10 @@ public class ChapterSeekBar extends androidx.appcompat.widget.AppCompatSeekBar {
                 setContentDescription(getContext().getString(
                         R.string.audio_skip_playback_detected_count_accessibility,
                         snapshot.occurrences.size()) + ". " + getContext().getString(
-                        R.string.audio_skip_playback_detected_accessibility,
+                        R.string.audio_skip_playback_detected_with_quality_accessibility,
                         Converter.getDurationStringLong((int) occurrence.startMs),
-                        Converter.getDurationStringLong((int) occurrence.endMs)));
+                        Converter.getDurationStringLong((int) occurrence.endMs),
+                        Math.round(occurrence.score * 100)));
             } else if (!snapshot.detections.isEmpty()) {
                 setContentDescription(getContext().getString(
                         R.string.audio_skip_playback_diagnostics_count_accessibility,

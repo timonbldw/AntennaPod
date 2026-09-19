@@ -1,11 +1,10 @@
 package de.danoeh.antennapod.ui.screen.feed.preferences.audioskip;
 
+import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
-import android.media.MediaPlayer;
-import android.net.Uri;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -22,6 +21,8 @@ import android.widget.Toast;
 import androidx.annotation.Nullable;
 import androidx.activity.OnBackPressedCallback;
 import androidx.core.util.Consumer;
+import androidx.media3.common.PlaybackException;
+import androidx.media3.common.Player;
 
 import com.google.android.material.color.MaterialColors;
 import com.google.android.material.dialog.MaterialAlertDialogBuilder;
@@ -41,6 +42,7 @@ import de.danoeh.antennapod.playback.service.skip.SkipAnalysisSnapshot;
 import de.danoeh.antennapod.playback.service.skip.SkipCoverage;
 import de.danoeh.antennapod.playback.service.skip.SkipDetection;
 import de.danoeh.antennapod.playback.service.skip.SkipMarker;
+import de.danoeh.antennapod.playback.service.skip.SkipPreviewPlayer;
 import de.danoeh.antennapod.playback.service.skip.SkipRule;
 import de.danoeh.antennapod.playback.service.skip.SkipSample;
 import de.danoeh.antennapod.playback.service.skip.SkipStreamingSource;
@@ -107,7 +109,7 @@ public class AudioSkipRulesActivity extends ToolbarActivity {
     private LinearLayout sampleContainer;
     private TextView validation;
     private SkipTask testTask;
-    private MediaPlayer testPlayer;
+    private Player testPlayer;
     private final Handler testHandler = new Handler(Looper.getMainLooper());
     private boolean testPlaybackStarted;
     private boolean testPlayerPrepared;
@@ -828,28 +830,40 @@ public class AudioSkipRulesActivity extends ToolbarActivity {
         stopTestPlayback();
         try {
             PlaybackController.bindToMedia3Service(this, controller -> controller.pause());
-            testPlayer = new MediaPlayer();
-            testPlayer.setDataSource(this, uri);
+            Player player = SkipPreviewPlayer.create(this, uri);
+            testPlayer = player;
             long start = Math.max(0, startHint - 5_000);
-            testPlayer.setOnPreparedListener(player -> {
-                if (isFinishing() || isDestroyed()) {
-                    stopTestPlayback();
-                    return;
+            player.addListener(new Player.Listener() {
+                @Override
+                public void onPlaybackStateChanged(int playbackState) {
+                    if (testPlayer != player) {
+                        return;
+                    }
+                    if (playbackState == Player.STATE_ENDED) {
+                        stopTestPlayback();
+                    } else if (playbackState == Player.STATE_READY && !testPlayerPrepared) {
+                        if (isFinishing() || isDestroyed()) {
+                            stopTestPlayback();
+                            return;
+                        }
+                        testPlayerPrepared = true;
+                        testPreviewStartedAt = SystemClock.uptimeMillis();
+                        player.seekTo(start);
+                        player.play();
+                        if (pendingTestEnd >= 0) {
+                            seekTestPreviewToEnd();
+                        }
+                    }
                 }
-                testPlayerPrepared = true;
-                testPreviewStartedAt = SystemClock.uptimeMillis();
-                player.seekTo((int) start);
-                player.start();
-                if (pendingTestEnd >= 0) {
-                    seekTestPreviewToEnd();
+
+                @Override
+                public void onPlayerError(PlaybackException error) {
+                    if (testPlayer == player) {
+                        stopTestPlayback();
+                    }
                 }
             });
-            testPlayer.setOnCompletionListener(player -> stopTestPlayback());
-            testPlayer.setOnErrorListener((player, what, extra) -> {
-                stopTestPlayback();
-                return true;
-            });
-            testPlayer.prepareAsync();
+            player.prepare();
         } catch (Exception error) {
             stopTestPlayback();
             Toast.makeText(this, R.string.audio_skip_preview_unavailable, Toast.LENGTH_LONG).show();
@@ -865,8 +879,8 @@ public class AudioSkipRulesActivity extends ToolbarActivity {
             testHandler.postDelayed(this::seekTestPreviewToEnd, remainingPreRoll);
             return;
         }
-        testPlayer.seekTo((int) pendingTestEnd);
-        testPlayer.start();
+        testPlayer.seekTo(pendingTestEnd);
+        testPlayer.play();
         testHandler.postDelayed(() -> stopTestPlayback(), 5_000);
         pendingTestEnd = -1;
     }
@@ -877,18 +891,8 @@ public class AudioSkipRulesActivity extends ToolbarActivity {
         pendingTestEnd = -1;
         testPreviewStartedAt = 0;
         if (testPlayer != null) {
-            try {
-                testPlayer.stop();
-            } catch (IllegalStateException ignored) {
-            }
-            try {
-                testPlayer.reset();
-            } catch (IllegalStateException ignored) {
-            }
-            try {
-                testPlayer.release();
-            } catch (IllegalStateException ignored) {
-            }
+            testPlayer.pause();
+            testPlayer.release();
             testPlayer = null;
         }
     }

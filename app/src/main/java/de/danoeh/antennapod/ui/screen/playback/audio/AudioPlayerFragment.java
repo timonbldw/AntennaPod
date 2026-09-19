@@ -545,7 +545,9 @@ public class AudioPlayerFragment extends Fragment implements
                     : getString(R.string.audio_skip_playback_diagnostics_only, snapshot.detections.size());
         } else {
             skipAnalysisButton.setText(getString(R.string.audio_skip_playback_error_short));
-            accessibilityDescription = getString(R.string.audio_skip_playback_error);
+            accessibilityDescription = snapshot.error == null
+                    ? getString(R.string.audio_skip_playback_error)
+                    : getString(R.string.audio_skip_playback_error_details, snapshot.error);
         }
         skipAnalysisButton.setContentDescription(accessibilityDescription);
     }

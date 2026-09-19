@@ -310,10 +310,11 @@ public class SkipResolverTest {
     public void incompleteEarlierCoverageDoesNotPublishPrematurePair() {
         SkipRule rule = rule(SkipRule.Type.BETWEEN, 0, 40_000, 0, 0, 0);
         List<SkipMarkerHit> hits = Arrays.asList(start(5_000), end(30_000));
-        assertTrue(resolve(rule, hits, Arrays.asList(new SkipCoverage(0, 10_000),
-                new SkipCoverage(25_000, 40_000))).isEmpty());
+        List<SkipCoverage> coverage = Arrays.asList(new SkipCoverage(0, 10_000),
+                new SkipCoverage(25_000, 40_000));
+        assertTrue(resolve(rule, hits, coverage).isEmpty());
         assertEquals(SkipDetection.Reason.PENDING, SkipResolver.resolveDetections(rule, hits, 120_000,
-                Arrays.asList(new SkipCoverage(0, 10_000), new SkipCoverage(25_000, 40_000))).get(0).reason);
+                coverage).get(0).reason);
     }
 
     @Test

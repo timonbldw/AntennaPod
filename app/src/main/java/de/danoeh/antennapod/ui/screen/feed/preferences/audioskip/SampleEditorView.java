@@ -4,8 +4,6 @@ import android.content.Context;
 import android.content.res.ColorStateList;
 import android.graphics.Canvas;
 import android.graphics.Paint;
-import android.media.MediaDataSource;
-import android.media.MediaPlayer;
 import android.net.Uri;
 import android.os.Handler;
 import android.os.Looper;
@@ -30,6 +28,8 @@ import android.widget.Toast;
 import androidx.core.util.Consumer;
 import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowInsetsCompat;
+import androidx.media3.common.PlaybackException;
+import androidx.media3.common.Player;
 
 import com.google.android.material.button.MaterialButton;
 import com.google.android.material.color.MaterialColors;
@@ -48,6 +48,7 @@ import de.danoeh.antennapod.model.feed.SortOrder;
 import de.danoeh.antennapod.playback.service.skip.SkipAudioClip;
 import de.danoeh.antennapod.playback.service.skip.SkipManager;
 import de.danoeh.antennapod.playback.service.skip.SkipMarker;
+import de.danoeh.antennapod.playback.service.skip.SkipPreviewPlayer;
 import de.danoeh.antennapod.playback.service.skip.SkipRule;
 import de.danoeh.antennapod.playback.service.skip.SkipSample;
 import de.danoeh.antennapod.playback.service.skip.SkipSampleCallback;
@@ -92,8 +93,7 @@ public final class SampleEditorView extends LinearLayout {
     private final Runnable debouncedWaveformLoad = this::loadWaveform;
     private SkipTask waveformTask;
     private SkipTask sampleTask;
-    private MediaPlayer mediaPlayer;
-    private MediaDataSource playbackDataSource;
+    private Player mediaPlayer;
     private SkipAudioClip clip;
     private Disposable clipTask;
     private EpisodeInfo episode;
@@ -375,8 +375,8 @@ public final class SampleEditorView extends LinearLayout {
         if (SkipStreamingSource.isStreaming(episode.uri)) {
             if (clip != null && windowStart >= clip.startMs
                     && windowStart + windowLength <= clip.endMs && isSelectionAvailable()) {
-                extractWaveform(clip.uri, windowStart - clip.startMs,
-                        windowStart + windowLength - clip.startMs);
+                extractWaveform(clip.uri, SkipPreviewPlayer.toSourcePosition(windowStart, clip.startMs),
+                        SkipPreviewPlayer.toSourcePosition(windowStart + windowLength, clip.startMs));
             } else {
                 loadStreamingClip(generation);
             }
@@ -700,8 +700,8 @@ public final class SampleEditorView extends LinearLayout {
                 return;
             }
             audioUri = clip.uri;
-            audioStart -= clip.startMs;
-            audioEnd -= clip.startMs;
+            audioStart = SkipPreviewPlayer.toSourcePosition(selectionStart, clip.startMs);
+            audioEnd = SkipPreviewPlayer.toSourcePosition(selectionEnd, clip.startMs);
         }
         final Uri requestUri = audioUri;
         final long requestStart = audioStart;
@@ -744,45 +744,48 @@ public final class SampleEditorView extends LinearLayout {
         }
         stopPreview();
         try {
-            if (SkipStreamingSource.isStreaming(episode.uri)) {
-                playbackDataSource = SkipStreamingSource.openForPlayback(episode.uri);
-            }
-            mediaPlayer = new MediaPlayer();
-            if (playbackDataSource == null) {
-                mediaPlayer.setDataSource(getContext(), episode.uri);
-            } else {
-                mediaPlayer.setDataSource(playbackDataSource);
-            }
-            mediaPlayer.setOnPreparedListener(player -> {
-                if (destroyed) {
-                    stopPreview();
-                    return;
+            Player player = SkipPreviewPlayer.create(getContext(), episode.uri);
+            mediaPlayer = player;
+            player.addListener(new Player.Listener() {
+                @Override
+                public void onPlaybackStateChanged(int playbackState) {
+                    if (mediaPlayer != player) {
+                        return;
+                    }
+                    if (playbackState == Player.STATE_ENDED) {
+                        if (loop.isChecked() && !destroyed) {
+                            playbackCursor = selectionStart;
+                            player.seekTo(selectionStart);
+                            player.play();
+                            scheduleCursorUpdate();
+                        } else {
+                            playbackCursor = episodeDuration;
+                            updateCursorDisplay();
+                            releasePreview();
+                        }
+                    } else if (playbackState == Player.STATE_READY && !playerPrepared) {
+                        if (destroyed) {
+                            stopPreview();
+                            return;
+                        }
+                        playerPrepared = true;
+                        long start = loop.isChecked() ? selectionStart : playbackCursor;
+                        player.seekTo(start);
+                        playbackCursor = start;
+                        updateCursorDisplay();
+                        player.play();
+                        scheduleCursorUpdate();
+                    }
                 }
-                playerPrepared = true;
-                long start = loop.isChecked() ? selectionStart : playbackCursor;
-                player.seekTo((int) start);
-                playbackCursor = start;
-                updateCursorDisplay();
-                player.start();
-                scheduleCursorUpdate();
-            });
-            mediaPlayer.setOnCompletionListener(player -> {
-                if (loop.isChecked() && !destroyed) {
-                    playbackCursor = selectionStart;
-                    player.seekTo((int) selectionStart);
-                    player.start();
-                    scheduleCursorUpdate();
-                    return;
+
+                @Override
+                public void onPlayerError(PlaybackException error) {
+                    if (mediaPlayer == player) {
+                        stopPreview();
+                    }
                 }
-                playbackCursor = episodeDuration;
-                updateCursorDisplay();
-                releasePreview();
             });
-            mediaPlayer.setOnErrorListener((player, what, extra) -> {
-                stopPreview();
-                return true;
-            });
-            mediaPlayer.prepareAsync();
+            player.prepare();
         } catch (Exception error) {
             stopPreview();
             Toast.makeText(getContext(), R.string.audio_skip_preview_unavailable, Toast.LENGTH_LONG).show();
@@ -791,32 +794,14 @@ public final class SampleEditorView extends LinearLayout {
 
     private void stopPreview() {
         previewHandler.removeCallbacksAndMessages(null);
-        MediaDataSource dataSource = playbackDataSource;
-        playbackDataSource = null;
-        if (dataSource != null) {
-            try {
-                dataSource.close();
-            } catch (IOException ignored) {
-            }
-        }
-        MediaPlayer player = mediaPlayer;
+        Player player = mediaPlayer;
         mediaPlayer = null;
         if (player != null) {
             if (playerPrepared) {
                 playbackCursor = Math.max(0, Math.min(episodeDuration, player.getCurrentPosition()));
             }
-            try {
-                player.stop();
-            } catch (IllegalStateException ignored) {
-            }
-            try {
-                player.reset();
-            } catch (IllegalStateException ignored) {
-            }
-            try {
-                player.release();
-            } catch (IllegalStateException ignored) {
-            }
+            player.pause();
+            player.release();
         }
         playerPrepared = false;
         updateCursorDisplay();
@@ -835,8 +820,8 @@ public final class SampleEditorView extends LinearLayout {
             playbackCursor = mediaPlayer.getCurrentPosition();
             if (loop.isChecked() && playbackCursor >= selectionEnd) {
                 playbackCursor = selectionStart;
-                mediaPlayer.seekTo((int) selectionStart);
-                mediaPlayer.start();
+                mediaPlayer.seekTo(selectionStart);
+                mediaPlayer.play();
             }
             updateCursorDisplay();
             scheduleCursorUpdate();
@@ -925,7 +910,7 @@ public final class SampleEditorView extends LinearLayout {
     private void seekCursor(long position, boolean keepVisible) {
         playbackCursor = Math.max(0, Math.min(episodeDuration, position));
         if (mediaPlayer != null && playerPrepared) {
-            mediaPlayer.seekTo((int) playbackCursor);
+            mediaPlayer.seekTo(playbackCursor);
         }
         if (keepVisible && (playbackCursor < windowStart || playbackCursor > windowStart + windowLength)) {
             centerCursorWindow();

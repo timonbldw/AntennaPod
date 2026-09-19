@@ -9,7 +9,9 @@
     <string name="audio_skip_playback_no_matches">No automatic skip sections detected</string>
     <string name="audio_skip_playback_not_analyzed">Automatic skip analysis not started</string>
     <string name="audio_skip_playback_error">Automatic skip analysis unavailable</string>
+    <string name="audio_skip_playback_error_details">Automatic skip analysis unavailable: %1$s</string>
     <string name="audio_skip_playback_waiting_for_audio">Waiting for streamed audio</string>
+    <string name="audio_skip_playback_waiting_for_audio_details">Waiting for streamed audio: %1$s</string>
     <string name="audio_skip_playback_window_ready">Automatic skip sections available in buffered audio (%1$d)</string>
     <string name="audio_skip_playback_download_required">Download the episode to analyze the remaining audio</string>
     <string name="audio_skip_playback_no_audio">No playable audio source</string>
@@ -28,10 +30,12 @@
     <string name="audio_skip_playback_show_sections">Show detected sections</string>
     <string name="audio_skip_playback_rule">%1$s</string>
     <string name="audio_skip_playback_range">%1$s - %2$s</string>
+    <string name="audio_skip_playback_match_quality">Match: %1$d%%</string>
     <string name="audio_skip_playback_listen">Listen to section</string>
     <string name="audio_skip_playback_jump_to_end">Jump to end</string>
     <string name="audio_skip_playback_coverage_accessibility">Analyzed audio from %1$s to %2$s</string>
     <string name="audio_skip_playback_detected_accessibility">Detected automatic skip section from %1$s to %2$s</string>
+    <string name="audio_skip_playback_detected_with_quality_accessibility">Detected automatic skip section from %1$s to %2$s, match quality %3$d percent</string>
     <string name="audio_skip_playback_detected_count_accessibility">Detected automatic skip sections: %1$d</string>
     <string name="audio_skip_playback_diagnostics_count_accessibility">Automatic skip marker diagnostics: %1$d</string>
     <string name="audio_skip_playback_diagnostics_only">Automatic skip marker diagnostics available (%1$d)</string>

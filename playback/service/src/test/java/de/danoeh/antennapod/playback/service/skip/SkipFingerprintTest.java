@@ -8,6 +8,7 @@ import java.util.Random;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
 public class SkipFingerprintTest {
@@ -25,6 +26,59 @@ public class SkipFingerprintTest {
                 SkipFingerprint.fromPcm(reference, 8_000), SkipFingerprint.fromPcm(episode, 16_000), 0, 0.82f);
         assertEquals(1, matches.size());
         assertEquals(3_017, matches.get(0).startMs, 32);
+        SkipFingerprint.Match best = SkipFingerprint.findBestMatch(
+                SkipFingerprint.fromPcm(reference, 8_000), SkipFingerprint.fromPcm(episode, 16_000), 0);
+        assertNotNull(best);
+        assertEquals(matches.get(0).startMs, best.startMs, 32);
+        assertEquals(matches.get(0).score, best.score, 0.000001f);
+    }
+
+    @Test
+    public void reportsBestMatchFrameDifferencesWithoutChangingScore() {
+        float[] reference = audio(8_000, 4, 17);
+        float[] episode = audio(8_000, 12, 53);
+        System.arraycopy(reference, 0, episode, 3 * 8_000 + 136, reference.length);
+        AudioFingerprint sample = SkipFingerprint.fromPcm(reference, 8_000);
+        AudioFingerprint target = SkipFingerprint.fromPcm(episode, 8_000);
+
+        SkipFingerprint.MatchDetails details = SkipFingerprint.findBestMatchDetails(sample, target, 0);
+        SkipFingerprint.Match match = SkipFingerprint.findBestMatch(sample, target, 0);
+
+        assertNotNull(details);
+        assertEquals(match.startMs, details.match.startMs);
+        assertEquals(match.score, details.match.score, 0.000001f);
+        assertTrue(details.activeFrames > 0);
+        assertTrue(details.mismatchingFrames >= 0);
+        assertTrue(details.distance >= details.mismatchingFrames);
+        assertEquals(4, details.segmentDistance.length);
+        assertEquals(details.activeFrames, Arrays.stream(details.segmentFrames).sum());
+    }
+
+    @Test
+    public void recognizesSameMarkerAtEveryMillisecondPhase() {
+        float[] reference = audio(8_000, 3, 17);
+        AudioFingerprint sample = SkipFingerprint.fromPcm(reference, 8_000);
+        for (int phaseMs = 0; phaseMs < SkipFingerprint.HOP_MS; phaseMs++) {
+            float[] episode = audio(8_000, 8, 53);
+            int offset = 2 * 8_000 + phaseMs * 8;
+            System.arraycopy(reference, 0, episode, offset, reference.length);
+            SkipFingerprint.Match best = SkipFingerprint.findBestMatch(sample,
+                    SkipFingerprint.fromPcm(episode, 8_000), 0);
+            assertNotNull(best);
+            assertTrue("phase=" + phaseMs + " score=" + best.score, best.score >= 0.82f);
+        }
+    }
+
+    @Test
+    public void rejectsMatchLimitedToLeadingHalf() {
+        float[] reference = audio(8_000, 4, 17);
+        float[] occurrence = audio(8_000, 4, 53);
+        System.arraycopy(reference, 0, occurrence, 0, 2 * 8_000);
+        float[] episode = audio(8_000, 8, 91);
+        System.arraycopy(occurrence, 0, episode, 2 * 8_000, occurrence.length);
+
+        assertTrue(SkipFingerprint.findMatches(SkipFingerprint.fromPcm(reference, 8_000),
+                SkipFingerprint.fromPcm(episode, 8_000), 0, 0.82f).isEmpty());
     }
 
     @Test

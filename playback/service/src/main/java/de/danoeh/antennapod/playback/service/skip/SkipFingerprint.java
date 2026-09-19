@@ -96,18 +96,7 @@ public final class SkipFingerprint {
         int lastFrame = target.frameCount() - sample.frameCount();
         for (int start = 0; start <= lastFrame; start++) {
             checkCancelled();
-            int distance = 0;
-            int budget = (int) ((1 - threshold) * activeFrames * 32);
-            for (int offset = 0; offset < sample.frameCount(); offset++) {
-                if (sample.hashes[offset] == 0) {
-                    continue;
-                }
-                distance += frameDistance(sample.hashes[offset], target.hashes[start + offset]);
-                if (distance > budget) {
-                    break;
-                }
-            }
-            float score = 1f - distance / (float) (activeFrames * 32);
+            float score = scoreAt(sample, target, start, activeFrames, threshold);
             if (score >= threshold) {
                 matches.add(new Match(targetStartMs + start * target.hopMs, score));
             }
@@ -130,6 +119,75 @@ public final class SkipFingerprint {
         return peaks;
     }
 
+    private static float scoreAt(AudioFingerprint sample, AudioFingerprint target, int start,
+                                 int activeFrames, float threshold) {
+        int distance = 0;
+        int budget = (int) ((1 - threshold) * activeFrames * 32);
+        for (int offset = 0; offset < sample.frameCount(); offset++) {
+            if (sample.hashes[offset] == 0) {
+                continue;
+            }
+            distance += frameDistance(sample.hashes[offset], target.hashes[start + offset]);
+            if (distance > budget) {
+                break;
+            }
+        }
+        return 1f - distance / (float) (activeFrames * 32);
+    }
+
+    static Match findBestMatch(AudioFingerprint sample, AudioFingerprint target, long targetStartMs) {
+        MatchDetails details = findBestMatchDetails(sample, target, targetStartMs);
+        return details == null ? null : details.match;
+    }
+
+    static MatchDetails findBestMatchDetails(AudioFingerprint sample, AudioFingerprint target, long targetStartMs) {
+        if (sample.frameCount() > target.frameCount() || sample.sampleRate != target.sampleRate
+                || sample.frameMs != target.frameMs || sample.hopMs != target.hopMs) {
+            return null;
+        }
+        int activeFrames = 0;
+        for (int hash : sample.hashes) {
+            if (hash != 0) {
+                activeFrames++;
+            }
+        }
+        if (activeFrames < 8) {
+            return null;
+        }
+        MatchDetails best = null;
+        int lastFrame = target.frameCount() - sample.frameCount();
+        for (int start = 0; start <= lastFrame; start++) {
+            checkCancelled();
+            int distance = 0;
+            int mismatchingFrames = 0;
+            for (int offset = 0; offset < sample.frameCount(); offset++) {
+                if (sample.hashes[offset] != 0) {
+                    int frameDistance = frameDistance(sample.hashes[offset], target.hashes[start + offset]);
+                    distance += frameDistance;
+                    if (frameDistance > 0) {
+                        mismatchingFrames++;
+                    }
+                }
+            }
+            float score = 1f - distance / (float) (activeFrames * 32);
+            if (best == null || score > best.match.score) {
+                int[] segmentDistance = new int[4];
+                int[] segmentFrames = new int[4];
+                for (int offset = 0; offset < sample.frameCount(); offset++) {
+                    if (sample.hashes[offset] != 0) {
+                        int segment = Math.min(3, offset * 4 / sample.frameCount());
+                        segmentDistance[segment] += frameDistance(
+                                sample.hashes[offset], target.hashes[start + offset]);
+                        segmentFrames[segment]++;
+                    }
+                }
+                best = new MatchDetails(new Match(targetStartMs + start * target.hopMs, score),
+                        activeFrames, mismatchingFrames, distance, segmentDistance, segmentFrames);
+            }
+        }
+        return best;
+    }
+
     private static int frameDistance(int first, int second) {
         int minority = Math.min(Math.min(Integer.bitCount(first), Integer.bitCount(second)),
                 Math.min(Integer.bitCount(~first), Integer.bitCount(~second)));
@@ -149,6 +207,25 @@ public final class SkipFingerprint {
         Match(long startMs, float score) {
             this.startMs = startMs;
             this.score = score;
+        }
+    }
+
+    static final class MatchDetails {
+        final Match match;
+        final int activeFrames;
+        final int mismatchingFrames;
+        final int distance;
+        final int[] segmentDistance;
+        final int[] segmentFrames;
+
+        MatchDetails(Match match, int activeFrames, int mismatchingFrames, int distance,
+                     int[] segmentDistance, int[] segmentFrames) {
+            this.match = match;
+            this.activeFrames = activeFrames;
+            this.mismatchingFrames = mismatchingFrames;
+            this.distance = distance;
+            this.segmentDistance = segmentDistance;
+            this.segmentFrames = segmentFrames;
         }
     }
 
