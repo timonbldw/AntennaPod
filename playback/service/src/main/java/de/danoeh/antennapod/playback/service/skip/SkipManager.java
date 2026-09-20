@@ -154,6 +154,27 @@ public final class SkipManager {
         return analyze(feedId, episodeId, audioUri, durationMs, positionMs, bufferedPositionMs, priority, false);
     }
 
+    public synchronized SkipTask retryAnalysis(String feedId, String episodeId, Uri audioUri, long durationMs,
+                                               long positionMs, SkipPriority priority) {
+        String validFeedId = requireId(feedId);
+        String validEpisodeId = requireId(episodeId);
+        validateAnalysis(audioUri, durationMs, positionMs);
+        String key = key(validFeedId, validEpisodeId);
+        AnalysisJob existing = jobs.get(key);
+        SkipAnalysisSnapshot snapshot = snapshots.get(key);
+        if (existing != null && snapshot != null && snapshot.status == SkipAnalysisStatus.ERROR
+                && !existing.task.isCancelled() && existing.audioUri.equals(audioUri)
+                && existing.requestedDurationMs == durationMs) {
+            existing.retry(positionMs, priority);
+            existing.emit(SkipAnalysisStatus.ANALYZING, null);
+            existing.enqueue();
+            return existing.task;
+        }
+        return SkipStreamingSource.isStreaming(audioUri)
+                ? analyzeForPlayback(validFeedId, validEpisodeId, audioUri, durationMs, positionMs, priority)
+                : analyze(validFeedId, validEpisodeId, audioUri, durationMs, 0, priority);
+    }
+
     private synchronized SkipTask analyze(String feedId, String episodeId, Uri audioUri, long durationMs,
                                            long positionMs, long bufferedPositionMs, SkipPriority priority,
                                            boolean fetchMissing) {
@@ -448,6 +469,19 @@ public final class SkipManager {
                 streamingAnalysisPositionMs = -1;
                 enqueue();
             }
+        }
+
+        synchronized void retry(long positionMs, SkipPriority priority) {
+            this.positionMs = positionMs;
+            this.priority = priority == null ? SkipPriority.BACKGROUND : priority;
+            streamingAnalysisPositionMs = -1;
+            streamingAnalysisEndMs = -1;
+            resetStreamingPassRequested = false;
+            streamingPassExhausted = false;
+            wakeRequested = false;
+            waitingError = null;
+            task.retry();
+            queued = false;
         }
 
         @Override

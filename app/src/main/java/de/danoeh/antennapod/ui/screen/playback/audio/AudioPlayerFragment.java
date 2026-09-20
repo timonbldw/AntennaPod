@@ -36,6 +36,7 @@ import de.danoeh.antennapod.playback.service.PlaybackServiceStarter;
 import de.danoeh.antennapod.playback.service.skip.SkipAnalysisSnapshot;
 import de.danoeh.antennapod.playback.service.skip.SkipAnalysisStatus;
 import de.danoeh.antennapod.playback.service.skip.SkipManager;
+import de.danoeh.antennapod.playback.service.skip.SkipPriority;
 import de.danoeh.antennapod.playback.service.skip.SkipStreamingSource;
 import de.danoeh.antennapod.playback.service.skip.SkipSubscription;
 import de.danoeh.antennapod.storage.database.DBReader;
@@ -115,6 +116,7 @@ public class AudioPlayerFragment extends Fragment implements
     private TextView txtvSeek;
     private Button skipAnalysisButton;
     private Button addSkipRuleButton;
+    private SkipAnalysisSnapshot skipAnalysisSnapshot;
     private boolean addSkipRuleLaunching;
 
     private FeedMedia currentMedia;
@@ -125,6 +127,8 @@ public class AudioPlayerFragment extends Fragment implements
     private SkipSubscription skipSubscription;
     private String skipFeedId;
     private String skipEpisodeId;
+    private Uri skipAnalysisSource;
+    private long skipAnalysisDuration;
     private int skipSourceGeneration;
     private CastStateListener castStateListener;
 
@@ -163,7 +167,13 @@ public class AudioPlayerFragment extends Fragment implements
         txtvSeek = root.findViewById(R.id.txtvSeek);
         skipAnalysisButton = root.findViewById(R.id.skipAnalysisButton);
         addSkipRuleButton = root.findViewById(R.id.addSkipRuleButton);
-        skipAnalysisButton.setOnClickListener(v -> showSkipAnalysisDialog());
+        skipAnalysisButton.setOnClickListener(v -> {
+            if (skipAnalysisSnapshot != null && skipAnalysisSnapshot.status == SkipAnalysisStatus.ERROR) {
+                retrySkipAnalysis();
+            } else {
+                showSkipAnalysisDialog();
+            }
+        });
         addSkipRuleButton.setOnClickListener(v -> addSkipRule());
         sbPosition.setContentDescription(getString(R.string.audio_skip_playback_show_sections));
 
@@ -357,6 +367,9 @@ public class AudioPlayerFragment extends Fragment implements
         final int generation = ++skipSourceGeneration;
         unsubscribeFromSkipAnalysis();
         sbPosition.setSkipAnalysis(null);
+        skipAnalysisSnapshot = null;
+        skipAnalysisSource = null;
+        skipAnalysisDuration = 0;
         skipAnalysisButton.setVisibility(View.GONE);
         addSkipRuleButton.setVisibility(View.GONE);
         addSkipRuleButton.setEnabled(false);
@@ -453,6 +466,8 @@ public class AudioPlayerFragment extends Fragment implements
     }
 
     private void observeSkipSnapshot(int generation, FeedMedia media, Uri sourceUri) {
+        skipAnalysisSource = sourceUri;
+        skipAnalysisDuration = Math.max(media.getDuration(), 0);
         SkipManager manager = SkipManager.getInstance(requireContext());
         SkipAnalysisSnapshot initialSnapshot = manager.getSnapshot(skipFeedId, skipEpisodeId);
         if (matchesSource(initialSnapshot, sourceUri)) {
@@ -487,13 +502,14 @@ public class AudioPlayerFragment extends Fragment implements
     }
 
     private void updateSkipAnalysisButton(SkipAnalysisSnapshot snapshot) {
+        skipAnalysisSnapshot = snapshot;
         if (snapshot == null || snapshot.status == SkipAnalysisStatus.NOT_ANALYZED) {
             skipAnalysisButton.setVisibility(View.GONE);
             return;
         }
         skipAnalysisButton.setVisibility(View.VISIBLE);
-        skipAnalysisButton.setEnabled(snapshot.status != SkipAnalysisStatus.NOT_ANALYZED
-                && (!snapshot.occurrences.isEmpty() || !snapshot.detections.isEmpty()));
+        skipAnalysisButton.setEnabled(snapshot.status == SkipAnalysisStatus.ERROR
+                || !snapshot.occurrences.isEmpty() || !snapshot.detections.isEmpty());
         CharSequence accessibilityDescription;
         if (snapshot.status == SkipAnalysisStatus.ANALYZING) {
             if (!snapshot.occurrences.isEmpty()) {
@@ -544,12 +560,24 @@ public class AudioPlayerFragment extends Fragment implements
                     ? getString(R.string.audio_skip_playback_no_matches)
                     : getString(R.string.audio_skip_playback_diagnostics_only, snapshot.detections.size());
         } else {
-            skipAnalysisButton.setText(getString(R.string.audio_skip_playback_error_short));
+            skipAnalysisButton.setText(getString(R.string.audio_skip_playback_retry));
             accessibilityDescription = snapshot.error == null
-                    ? getString(R.string.audio_skip_playback_error)
-                    : getString(R.string.audio_skip_playback_error_details, snapshot.error);
+                    ? getString(R.string.audio_skip_playback_retry) + ". "
+                    + getString(R.string.audio_skip_playback_error)
+                    : getString(R.string.audio_skip_playback_retry) + ". "
+                    + getString(R.string.audio_skip_playback_error_details, snapshot.error);
         }
         skipAnalysisButton.setContentDescription(accessibilityDescription);
+    }
+
+    private void retrySkipAnalysis() {
+        if (currentMedia == null || skipAnalysisSource == null || skipFeedId == null || skipEpisodeId == null
+                || skipAnalysisDuration <= 0) {
+            return;
+        }
+        skipAnalysisButton.setEnabled(false);
+        SkipManager.getInstance(requireContext()).retryAnalysis(skipFeedId, skipEpisodeId, skipAnalysisSource,
+                skipAnalysisDuration, 0, SkipPriority.HIGH);
     }
 
     private void showSkipAnalysisDialog() {

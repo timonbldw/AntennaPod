@@ -49,4 +49,9 @@ public final class SkipTask {
     void complete() {
         complete = true;
     }
+
+    void retry() {
+        complete = false;
+        future = null;
+    }
 }

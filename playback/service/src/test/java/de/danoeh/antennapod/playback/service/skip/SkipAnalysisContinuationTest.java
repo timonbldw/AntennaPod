@@ -172,6 +172,38 @@ public class SkipAnalysisContinuationTest {
     }
 
     @Test
+    public void terminalAnalysisErrorCanBeRetried() throws Exception {
+        String feedId = UUID.randomUUID().toString();
+        manager.saveRule(feedId, rule);
+        AudioDecoderShadow.incompleteAllDecodes = true;
+        CountDownLatch failed = new CountDownLatch(1);
+        AtomicReference<SkipAnalysisSnapshot> result = new AtomicReference<>();
+        try (SkipSubscription subscription = manager.observe(feedId, "retry", snapshot -> {
+            if (snapshot.status == SkipAnalysisStatus.ERROR) {
+                result.set(snapshot);
+                failed.countDown();
+            }
+            if (snapshot.status == SkipAnalysisStatus.READY) {
+                result.set(snapshot);
+            }
+        })) {
+            SkipTask first = manager.analyze(feedId, "retry", source, 60_000, 0, SkipPriority.CURRENT_PLAYBACK);
+            assertTrue(failed.await(10, TimeUnit.SECONDS));
+            assertEquals(SkipAnalysisStatus.ERROR, result.get().status);
+            AudioDecoderShadow.incompleteAllDecodes = false;
+            SkipTask retry = manager.retryAnalysis(feedId, "retry", source, 60_000, 0,
+                    SkipPriority.CURRENT_PLAYBACK);
+            assertTrue(retry == first);
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+            while (result.get().status != SkipAnalysisStatus.READY && System.nanoTime() < deadline) {
+                Thread.sleep(10);
+            }
+            assertEquals(SkipAnalysisStatus.READY, result.get().status);
+            assertTrue(retry.isDone());
+        }
+    }
+
+    @Test
     public void continuesAfterIncompleteLaterLocalDecoderWindow() throws Exception {
         String feedId = UUID.randomUUID().toString();
         manager.saveRule(feedId, rule);
