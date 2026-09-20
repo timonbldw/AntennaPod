@@ -2,6 +2,7 @@ package de.danoeh.antennapod.playback.service.skip;
 
 import android.content.Context;
 import android.net.Uri;
+import android.content.SharedPreferences;
 
 import androidx.annotation.NonNull;
 import androidx.work.Worker;
@@ -17,6 +18,10 @@ import java.util.concurrent.atomic.AtomicReference;
 public class SkipAnalysisWorker extends Worker {
     public static final String WORK_DATA_MEDIA_ID = "media_id";
     private static final long RUN_BUDGET_MS = TimeUnit.MINUTES.toMillis(4);
+    private static final int MAX_RETRIES = 3;
+    private static final String RETRY_PREFERENCES = "audio_skip_analysis_retries";
+    private static final String ERROR_RETRY_PREFIX = "error:";
+    private static final String INPUT_RETRY_PREFIX = "input:";
 
     private final CountDownLatch completion = new CountDownLatch(1);
     private final AtomicReference<SkipAnalysisStatus> status = new AtomicReference<>();
@@ -29,10 +34,14 @@ public class SkipAnalysisWorker extends Worker {
     @NonNull
     @Override
     public Result doWork() {
-        FeedMedia media = DBReader.getFeedMedia(getInputData().getLong(WORK_DATA_MEDIA_ID, 0));
-        if (media == null || !media.localFileAvailable() || media.getItem() == null
-                || media.getItem().getFeed() == null || media.getDuration() <= 0) {
+        long mediaId = getInputData().getLong(WORK_DATA_MEDIA_ID, 0);
+        FeedMedia media = DBReader.getFeedMedia(mediaId);
+        if (media == null) {
             return Result.success();
+        }
+        if (!media.localFileAvailable() || media.getItem() == null || media.getItem().getFeed() == null
+                || media.getDuration() <= 0) {
+            return retryWithCount(INPUT_RETRY_PREFIX, mediaId) ? Result.retry() : Result.failure();
         }
 
         String feedId = String.valueOf(media.getItem().getFeed().getId());
@@ -71,7 +80,31 @@ public class SkipAnalysisWorker extends Worker {
         if (isStopped() || task == null || task.isCancelled()) {
             return Result.retry();
         }
-        return status.get() == SkipAnalysisStatus.ERROR ? Result.failure() : Result.success();
+        if (status.get() != SkipAnalysisStatus.ERROR) {
+            clearRetryCounts(getApplicationContext(), mediaId);
+            return Result.success();
+        }
+        return retryWithCount(ERROR_RETRY_PREFIX, mediaId) ? Result.retry() : Result.failure();
+    }
+
+    static void clearRetryCounts(Context context, long mediaId) {
+        context.getSharedPreferences(RETRY_PREFERENCES, Context.MODE_PRIVATE)
+                .edit()
+                .remove(ERROR_RETRY_PREFIX + mediaId)
+                .remove(INPUT_RETRY_PREFIX + mediaId)
+                .apply();
+    }
+
+    private boolean retryWithCount(String prefix, long mediaId) {
+        String key = prefix + mediaId;
+        SharedPreferences preferences = getApplicationContext()
+                .getSharedPreferences(RETRY_PREFERENCES, Context.MODE_PRIVATE);
+        int retries = preferences.getInt(key, 0);
+        if (retries >= MAX_RETRIES) {
+            return false;
+        }
+        preferences.edit().putInt(key, retries + 1).apply();
+        return true;
     }
 
     @Override

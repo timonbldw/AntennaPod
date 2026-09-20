@@ -37,6 +37,7 @@ import de.danoeh.antennapod.playback.service.skip.SkipDetection;
 import de.danoeh.antennapod.playback.service.skip.SkipManager;
 import de.danoeh.antennapod.playback.service.skip.SkipMarker;
 import de.danoeh.antennapod.playback.service.skip.SkipOccurrence;
+import de.danoeh.antennapod.playback.service.skip.SkipPriority;
 import de.danoeh.antennapod.playback.service.skip.SkipRule;
 import de.danoeh.antennapod.playback.service.skip.SkipStreamingSource;
 import de.danoeh.antennapod.playback.service.skip.SkipSubscription;
@@ -65,7 +66,9 @@ public class ChaptersFragment extends AppCompatDialogFragment {
     private ProgressBar progressBar;
     private LinearLayout skipAnalysisRows;
     private TextView skipAnalysisStatus;
+    private Button skipAnalysisRetry;
     private SkipSubscription skipSubscription;
+    private Uri skipSourceUri;
     private String skipFeedId;
     private String skipEpisodeId;
     private int skipSourceGeneration;
@@ -99,6 +102,8 @@ public class ChaptersFragment extends AppCompatDialogFragment {
         progressBar = root.findViewById(R.id.progLoading);
         skipAnalysisRows = root.findViewById(R.id.skipAnalysisRows);
         skipAnalysisStatus = root.findViewById(R.id.skipAnalysisStatus);
+        skipAnalysisRetry = root.findViewById(R.id.skipAnalysisRetry);
+        skipAnalysisRetry.setOnClickListener(v -> retrySkipAnalysis());
         layoutManager = new LinearLayoutManager(getActivity());
         recyclerView.setLayoutManager(layoutManager);
         recyclerView.addItemDecoration(new DividerItemDecoration(recyclerView.getContext(),
@@ -128,6 +133,8 @@ public class ChaptersFragment extends AppCompatDialogFragment {
             skipSubscription.close();
             skipSubscription = null;
         }
+        skipSourceUri = null;
+        skipAnalysisRetry.setVisibility(View.GONE);
         displaySkipAnalysis(SkipAnalysisSnapshot.notAnalyzed("", ""));
         if (!(media instanceof FeedMedia) || ((FeedMedia) media).getItem() == null
                 || ((FeedMedia) media).getItem().getFeed() == null) {
@@ -152,6 +159,7 @@ public class ChaptersFragment extends AppCompatDialogFragment {
                     if (sourceUri == null) {
                         skipAnalysisRows.removeAllViews();
                         skipAnalysisStatus.setText(R.string.audio_skip_playback_no_audio);
+                        skipAnalysisRetry.setVisibility(View.GONE);
                         return;
                     }
                     observeSkipSnapshot(generation, observedMedia, sourceUri);
@@ -189,6 +197,7 @@ public class ChaptersFragment extends AppCompatDialogFragment {
     }
 
     private void observeSkipSnapshot(int generation, FeedMedia media, Uri sourceUri) {
+        skipSourceUri = sourceUri;
         SkipManager manager = SkipManager.getInstance(requireContext());
         SkipAnalysisSnapshot initialSnapshot = manager.getSnapshot(skipFeedId, skipEpisodeId);
         if (matchesSource(initialSnapshot, sourceUri)) {
@@ -216,10 +225,12 @@ public class ChaptersFragment extends AppCompatDialogFragment {
     }
 
     private void displaySkipAnalysis(SkipAnalysisSnapshot snapshot) {
-        if (skipAnalysisRows == null || skipAnalysisStatus == null) {
+        if (skipAnalysisRows == null || skipAnalysisStatus == null || skipAnalysisRetry == null) {
             return;
         }
         skipAnalysisRows.removeAllViews();
+        skipAnalysisRetry.setVisibility(snapshot.status == SkipAnalysisStatus.ERROR ? View.VISIBLE : View.GONE);
+        skipAnalysisRetry.setEnabled(snapshot.status == SkipAnalysisStatus.ERROR);
         String status;
         if (snapshot.status == SkipAnalysisStatus.ANALYZING) {
             status = snapshot.occurrences.isEmpty()
@@ -312,6 +323,27 @@ public class ChaptersFragment extends AppCompatDialogFragment {
             row.setContentDescription(details.getText());
             skipAnalysisRows.addView(row);
         }
+    }
+
+    private void retrySkipAnalysis() {
+        if (!(media instanceof FeedMedia) || skipSourceUri == null || skipFeedId == null
+                || skipEpisodeId == null || media.getDuration() <= 0) {
+            return;
+        }
+        skipAnalysisRetry.setEnabled(false);
+        FeedMedia capturedMedia = (FeedMedia) media;
+        if (!SkipStreamingSource.isStreaming(skipSourceUri)) {
+            SkipManager.getInstance(requireContext()).retryAnalysis(skipFeedId, skipEpisodeId, skipSourceUri,
+                    capturedMedia.getDuration(), 0, SkipPriority.HIGH);
+            return;
+        }
+        PlaybackController.bindToMedia3Service(getActivity(), controller -> {
+            if (getActivity() != null && this.media == capturedMedia) {
+                SkipManager.getInstance(requireContext()).retryAnalysis(skipFeedId, skipEpisodeId, skipSourceUri,
+                        capturedMedia.getDuration(), Math.max(0, controller.getCurrentPosition()),
+                        SkipPriority.HIGH);
+            }
+        });
     }
 
     private int diagnosticReason(SkipDetection.Reason reason) {

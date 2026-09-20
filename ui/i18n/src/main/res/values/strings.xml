@@ -10,6 +10,7 @@
     <string name="audio_skip_playback_not_analyzed">Automatic skip analysis not started</string>
     <string name="audio_skip_playback_error">Automatic skip analysis unavailable</string>
     <string name="audio_skip_playback_error_details">Automatic skip analysis unavailable: %1$s</string>
+    <string name="audio_skip_playback_retry">Retry analysis</string>
     <string name="audio_skip_playback_waiting_for_audio">Waiting for streamed audio</string>
     <string name="audio_skip_playback_waiting_for_audio_details">Waiting for streamed audio: %1$s</string>
     <string name="audio_skip_playback_window_ready">Automatic skip sections available in buffered audio (%1$d)</string>
