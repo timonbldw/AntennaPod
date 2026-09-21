@@ -101,6 +101,17 @@ final class SkipAnalysisCache {
         atomicWrite(fileFor(feedId, episodeId), object.toString());
     }
 
+    synchronized void delete(String feedId, String episodeId) throws IOException {
+        File file = fileFor(feedId, episodeId);
+        File temporary = new File(file.getPath() + ".tmp");
+        if (temporary.exists() && !temporary.delete()) {
+            throw new IOException("Cannot delete skip analysis cache");
+        }
+        if (file.exists() && !file.delete()) {
+            throw new IOException("Cannot delete skip analysis cache");
+        }
+    }
+
     private File fileFor(String feedId, String episodeId) {
         return new File(directory, SkipStorageKey.digest(feedId + "\n" + episodeId) + ".json");
     }

@@ -186,7 +186,13 @@ public class ChaptersFragment extends AppCompatDialogFragment {
             return null;
         }
         MediaItem item = controller.getCurrentMediaItem();
-        if (item == null || item.localConfiguration == null || !String.valueOf(media.getId()).equals(item.mediaId)) {
+        if (media.localFileAvailable()) {
+            if (item == null || String.valueOf(media.getId()).equals(item.mediaId)) {
+                return Uri.parse(media.getLocalFileUrl());
+            }
+        }
+        if (item == null || !String.valueOf(media.getId()).equals(item.mediaId)
+                || item.localConfiguration == null) {
             return null;
         }
         if (isCurrentLocalPlayback(controller, media)) {
@@ -199,6 +205,7 @@ public class ChaptersFragment extends AppCompatDialogFragment {
     private void observeSkipSnapshot(int generation, FeedMedia media, Uri sourceUri) {
         skipSourceUri = sourceUri;
         SkipManager manager = SkipManager.getInstance(requireContext());
+        manager.restoreAnalysis(skipFeedId, skipEpisodeId, sourceUri, media.getDuration());
         SkipAnalysisSnapshot initialSnapshot = manager.getSnapshot(skipFeedId, skipEpisodeId);
         if (matchesSource(initialSnapshot, sourceUri)) {
             displaySkipAnalysis(initialSnapshot);

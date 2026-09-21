@@ -10,6 +10,8 @@ import de.danoeh.antennapod.model.feed.FeedMedia;
 import de.danoeh.antennapod.model.feed.SortOrder;
 import de.danoeh.antennapod.net.sync.serviceinterface.SynchronizationQueue;
 import de.danoeh.antennapod.net.sync.serviceinterface.SynchronizationQueueStub;
+import de.danoeh.antennapod.playback.base.SkipAnalysisScheduler;
+import de.danoeh.antennapod.storage.preferences.PlaybackPreferences;
 import de.danoeh.antennapod.storage.preferences.UserPreferences;
 import org.junit.Before;
 import org.junit.Test;
@@ -22,6 +24,7 @@ import java.util.Collections;
 import java.util.Date;
 import java.util.List;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -38,6 +41,7 @@ public class FeedDatabaseWriterTest {
     public void setUp() {
         context = RuntimeEnvironment.getApplication();
         UserPreferences.init(context);
+        PlaybackPreferences.init(context);
         PodDBAdapter.init(context);
         PodDBAdapter.deleteDatabase();
         PodDBAdapter adapter = PodDBAdapter.getInstance();
@@ -59,6 +63,40 @@ public class FeedDatabaseWriterTest {
         for (int i = 0; i < 3; i++) {
             assertEquals("item-" + i, storedItems.get(i).getItemIdentifier());
         }
+    }
+
+    @Test
+    public void deletingDownloadedMediaRemovesSkipAnalysis() throws Exception {
+        Feed feed = createFeed();
+        FeedItem item = createItem("item", "Item", feed);
+        feed.getItems().add(item);
+        PodDBAdapter adapter = PodDBAdapter.getInstance();
+        adapter.open();
+        adapter.setCompleteFeed(feed);
+        adapter.close();
+
+        AtomicReference<String> feedId = new AtomicReference<>();
+        AtomicReference<String> episodeId = new AtomicReference<>();
+        SkipAnalysisScheduler.setImpl(new SkipAnalysisScheduler() {
+            @Override
+            public void enqueue(Context context, long mediaId) {
+            }
+
+            @Override
+            public void remove(Context context, long mediaId, String removedFeedId, String removedEpisodeId) {
+                feedId.set(removedFeedId);
+                episodeId.set(removedEpisodeId);
+            }
+        });
+        SynchronizationQueue.setInstance(new SynchronizationQueueStub());
+        try {
+            DBWriter.deleteFeedMediaOfItem(context, item.getMedia()).get();
+        } finally {
+            SkipAnalysisScheduler.setImpl(null);
+        }
+
+        assertEquals(String.valueOf(feed.getId()), feedId.get());
+        assertEquals(String.valueOf(item.getId()), episodeId.get());
     }
 
     @Test
