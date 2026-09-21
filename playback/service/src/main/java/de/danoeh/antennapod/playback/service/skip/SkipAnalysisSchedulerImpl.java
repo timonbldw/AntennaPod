@@ -27,4 +27,11 @@ public class SkipAnalysisSchedulerImpl extends SkipAnalysisScheduler {
         WorkManager.getInstance(context).enqueueUniqueWork(WORK_NAME_PREFIX + mediaId,
                 ExistingWorkPolicy.REPLACE, request);
     }
+
+    @Override
+    public void remove(Context context, long mediaId, String feedId, String episodeId) {
+        WorkManager.getInstance(context).cancelUniqueWork(WORK_NAME_PREFIX + mediaId);
+        SkipAnalysisWorker.clearRetryCounts(context, mediaId);
+        SkipManager.getInstance(context).removeAnalysis(feedId, episodeId);
+    }
 }

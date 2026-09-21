@@ -15,6 +15,7 @@ import java.util.Collections;
 import java.util.UUID;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -88,7 +89,7 @@ public class SkipStorageTest {
     @Test
     public void cachePreservesSourceRevisionCoverageAndMarkerSample() throws IOException {
         Context context = ApplicationProvider.getApplicationContext();
-        SkipAnalysisCache cache = new SkipAnalysisCache(context.getCacheDir());
+        SkipAnalysisCache cache = new SkipAnalysisCache(context.getFilesDir());
         String feedId = UUID.randomUUID().toString();
         SkipAnalysisCache.Entry entry = new SkipAnalysisCache.Entry("source:size:mtime", 12, 100_000,
                 Arrays.asList(new SkipCoverage(0, 30_000), new SkipCoverage(60_000, 90_000)),
@@ -101,5 +102,16 @@ public class SkipStorageTest {
         assertEquals(60_000, restored.coverage.get(1).startMs);
         assertEquals("alternate", restored.hits.get(0).sampleId);
         assertEquals(65_000, restored.hits.get(0).timeMs);
+    }
+
+    @Test
+    public void cacheCanBeDeletedForEpisode() throws IOException {
+        Context context = ApplicationProvider.getApplicationContext();
+        SkipAnalysisCache cache = new SkipAnalysisCache(context.getFilesDir());
+        String feedId = UUID.randomUUID().toString();
+        cache.write(feedId, "episode", new SkipAnalysisCache.Entry("source", 1, 100_000,
+                Collections.singletonList(new SkipCoverage(0, 30_000)), Collections.emptyList()));
+        cache.delete(feedId, "episode");
+        assertNull(cache.read(feedId, "episode"));
     }
 }

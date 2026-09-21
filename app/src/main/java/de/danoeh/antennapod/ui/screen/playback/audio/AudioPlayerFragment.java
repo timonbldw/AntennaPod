@@ -455,7 +455,13 @@ public class AudioPlayerFragment extends Fragment implements
             return null;
         }
         MediaItem item = controller.getCurrentMediaItem();
-        if (item == null || item.localConfiguration == null || !String.valueOf(media.getId()).equals(item.mediaId)) {
+        if (media.localFileAvailable()) {
+            if (item == null || String.valueOf(media.getId()).equals(item.mediaId)) {
+                return Uri.parse(media.getLocalFileUrl());
+            }
+        }
+        if (item == null || !String.valueOf(media.getId()).equals(item.mediaId)
+                || item.localConfiguration == null) {
             return null;
         }
         if (isCurrentLocalPlayback(controller, media)) {
@@ -469,6 +475,7 @@ public class AudioPlayerFragment extends Fragment implements
         skipAnalysisSource = sourceUri;
         skipAnalysisDuration = Math.max(media.getDuration(), 0);
         SkipManager manager = SkipManager.getInstance(requireContext());
+        manager.restoreAnalysis(skipFeedId, skipEpisodeId, sourceUri, skipAnalysisDuration);
         SkipAnalysisSnapshot initialSnapshot = manager.getSnapshot(skipFeedId, skipEpisodeId);
         if (matchesSource(initialSnapshot, sourceUri)) {
             sbPosition.setSkipAnalysis(initialSnapshot);

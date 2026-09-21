@@ -590,8 +590,7 @@ public class Media3PlaybackService extends MediaLibraryService {
     }
 
     private void startSkipAnalysis(FeedMedia media) {
-        long playerDuration = player == null ? 0 : player.getDuration();
-        long duration = skipSubscription == null ? getSkipAnalysisDuration(media) : playerDuration;
+        long duration = getSkipAnalysisDuration(media);
         Uri audioUri = getCurrentSkipSource(media);
         if (audioUri == null || media.getItem() == null || media.getItem().getFeed() == null
                 || duration <= 0) {
@@ -653,6 +652,9 @@ public class Media3PlaybackService extends MediaLibraryService {
     }
 
     private long getSkipAnalysisDuration(@Nullable FeedMedia media) {
+        if (media != null && media.localFileAvailable() && media.getDuration() > 0) {
+            return media.getDuration();
+        }
         if (player != null && player.getDuration() > 0) {
             return player.getDuration();
         }
