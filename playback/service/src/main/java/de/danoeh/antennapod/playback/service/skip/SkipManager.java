@@ -35,12 +35,14 @@ public final class SkipManager {
     private final Map<String, SkipAnalysisSnapshot> snapshots = new HashMap<>();
     private final Map<String, List<SkipAnalysisCallback>> observers = new HashMap<>();
     private final Map<String, AnalysisJob> jobs = new HashMap<>();
+    private final Set<String> restoringAnalyses = new HashSet<>();
+    private final Map<String, SkipAnalysisCache.Entry> streamingCheckpoints = new HashMap<>();
     private final List<AnalysisJob> decoderSessionOwners = new ArrayList<>();
 
     private SkipManager(Context context) {
         this.context = context.getApplicationContext();
         ruleStore = new SkipRuleStore(this.context);
-        analysisCache = new SkipAnalysisCache(this.context.getCacheDir());
+        analysisCache = new SkipAnalysisCache(this.context.getFilesDir());
     }
 
     public static SkipManager getInstance(Context context) {
@@ -137,6 +139,51 @@ public final class SkipManager {
         return snapshot == null ? SkipAnalysisSnapshot.notAnalyzed(feedId, episodeId) : snapshot;
     }
 
+    public void restoreAnalysis(String feedId, String episodeId, Uri audioUri, long durationMs) {
+        String validFeedId = requireId(feedId);
+        String validEpisodeId = requireId(episodeId);
+        validateAnalysis(audioUri, durationMs, 0);
+        if (!reusableSource(audioUri)) {
+            return;
+        }
+        String analysisKey = key(validFeedId, validEpisodeId);
+        synchronized (this) {
+            AnalysisJob existing = jobs.get(analysisKey);
+            SkipAnalysisSnapshot snapshot = snapshots.get(analysisKey);
+            if (existing != null || restoringAnalyses.contains(analysisKey)
+                    || snapshot != null && snapshot.status != SkipAnalysisStatus.NOT_ANALYZED) {
+                return;
+            }
+            restoringAnalyses.add(analysisKey);
+        }
+        Thread restoreThread = new Thread(() -> restoreAnalysis(validFeedId, validEpisodeId, audioUri,
+                durationMs, analysisKey), "skip-audio-analysis-restore");
+        restoreThread.setDaemon(true);
+        restoreThread.start();
+    }
+
+    public synchronized void removeAnalysis(String feedId, String episodeId) {
+        String validFeedId = requireId(feedId);
+        String validEpisodeId = requireId(episodeId);
+        String analysisKey = key(validFeedId, validEpisodeId);
+        AnalysisJob job = jobs.remove(analysisKey);
+        if (job != null) {
+            job.task.cancel();
+        }
+        try {
+            analysisCache.delete(validFeedId, validEpisodeId);
+        } catch (IOException ignored) {
+        }
+        streamingCheckpoints.remove(analysisKey);
+        restoringAnalyses.remove(analysisKey);
+        boolean hadState = snapshots.containsKey(analysisKey) || job != null || observers.containsKey(analysisKey);
+        if (hadState) {
+            SkipAnalysisSnapshot snapshot = SkipAnalysisSnapshot.notAnalyzed(validFeedId, validEpisodeId);
+            snapshots.put(analysisKey, snapshot);
+            publish(analysisKey, snapshot);
+        }
+    }
+
     public synchronized SkipTask analyze(String feedId, String episodeId, Uri audioUri, long durationMs,
                                           long positionMs, SkipPriority priority) {
         return analyze(feedId, episodeId, audioUri, durationMs, positionMs, -1, priority, true);
@@ -226,6 +273,55 @@ public final class SkipManager {
                 System.currentTimeMillis()));
         job.enqueue();
         return job.task;
+    }
+
+    private void restoreAnalysis(String feedId, String episodeId, Uri audioUri, long durationMs, String analysisKey) {
+        try {
+            SkipRuleStore.RuleSet saved = ruleStore.read(feedId);
+            SkipAnalysisCache.Entry cached = analysisCache.read(feedId, episodeId);
+            String identity = sourceIdentity(audioUri);
+            if (cached == null || !identity.equals(cached.sourceIdentity)
+                    || cached.rulesRevision != saved.revision || cached.durationMs != durationMs) {
+                if (BuildConfig.DEBUG) {
+                    Log.d("SkipManager", "Analysis restore rejected feed=" + feedId + " episode=" + episodeId
+                            + " cached=" + (cached == null ? "missing" : cached.sourceIdentity + ":"
+                            + cached.rulesRevision + ":" + cached.durationMs) + " requested=" + identity + ":"
+                            + saved.revision + ":" + durationMs);
+                }
+                return;
+            }
+            List<SkipRule> rules = new ArrayList<>();
+            for (SkipRule rule : saved.rules) {
+                rule.validate();
+                if (rule.enabled) {
+                    rules.add(rule);
+                }
+            }
+            Resolution resolution = resolveAll(rules, cached.hits, durationMs, cached.coverage);
+            SkipAnalysisStatus status = isFullyCovered(cached.coverage, durationMs)
+                    ? completedStatus(resolution) : SkipAnalysisStatus.ANALYZING;
+            synchronized (this) {
+                if (jobs.containsKey(analysisKey)) {
+                    return;
+                }
+                SkipAnalysisSnapshot existing = snapshots.get(analysisKey);
+                if (existing != null && existing.status != SkipAnalysisStatus.NOT_ANALYZED) {
+                    return;
+                }
+                publish(analysisKey, new SkipAnalysisSnapshot(feedId, episodeId, status, saved.revision,
+                        identity, durationMs, cached.coverage, resolution.occurrences, resolution.detections,
+                        null, System.currentTimeMillis()));
+            }
+        } catch (IOException | RuntimeException error) {
+            if (BuildConfig.DEBUG) {
+                Log.d("SkipManager", "Analysis restore failed feed=" + feedId + " episode=" + episodeId,
+                        error);
+            }
+        } finally {
+            synchronized (this) {
+                restoringAnalyses.remove(analysisKey);
+            }
+        }
     }
 
     public synchronized boolean reprioritize(String feedId, String episodeId, long positionMs,
@@ -707,6 +803,16 @@ public final class SkipManager {
                     }
                 } catch (IOException ignored) {
                 }
+            } else if (callback == null && SkipStreamingSource.isStreaming(audioUri)) {
+                SkipAnalysisCache.Entry cached;
+                synchronized (SkipManager.this) {
+                    cached = streamingCheckpoints.get(key);
+                }
+                if (cached != null && identity.equals(cached.sourceIdentity)
+                        && cached.rulesRevision == revision && cached.durationMs == durationMs) {
+                    coverage = new ArrayList<>(cached.coverage);
+                    hits = new ArrayList<>(cached.hits);
+                }
             }
         }
 
@@ -1080,13 +1186,19 @@ public final class SkipManager {
 
         private void checkpoint() {
             synchronized (SkipManager.this) {
-                if (callback != null || !cacheableSource(audioUri) || jobs.get(key) != this) {
+                if (callback != null || (!cacheableSource(audioUri) && !SkipStreamingSource.isStreaming(audioUri))
+                        || jobs.get(key) != this) {
                     return;
                 }
-                try {
-                    analysisCache.write(feedId, episodeId,
-                            new SkipAnalysisCache.Entry(identity, revision, durationMs, coverage, hits));
-                } catch (IOException ignored) {
+                SkipAnalysisCache.Entry entry = new SkipAnalysisCache.Entry(identity, revision, durationMs,
+                        coverage, hits);
+                if (cacheableSource(audioUri)) {
+                    try {
+                        analysisCache.write(feedId, episodeId, entry);
+                    } catch (IOException ignored) {
+                    }
+                } else if (SkipStreamingSource.isStreaming(audioUri)) {
+                    streamingCheckpoints.put(key, entry);
                 }
             }
         }
@@ -1264,6 +1376,8 @@ public final class SkipManager {
                         key.substring(feedId.length() + 1));
                 snapshots.put(key, snapshot);
                 invalidated.put(key, snapshot);
+                streamingCheckpoints.remove(key);
+                restoringAnalyses.remove(key);
             }
         }
         for (Map.Entry<String, SkipAnalysisSnapshot> entry : invalidated.entrySet()) {
@@ -1278,7 +1392,7 @@ public final class SkipManager {
     }
 
     private static boolean cacheableSource(Uri uri) {
-        return reusableSource(uri) || SkipStreamingSource.isStreaming(uri);
+        return reusableSource(uri);
     }
 
     private static String sourceIdentity(Uri uri) {

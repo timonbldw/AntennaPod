@@ -19,6 +19,7 @@ import de.danoeh.antennapod.net.download.serviceinterface.AutoDownloadManager;
 import de.danoeh.antennapod.net.download.serviceinterface.DownloadServiceInterface;
 import de.danoeh.antennapod.net.download.serviceinterface.FeedUpdateManager;
 import de.danoeh.antennapod.net.sync.serviceinterface.SynchronizationQueue;
+import de.danoeh.antennapod.playback.base.SkipAnalysisScheduler;
 import de.danoeh.antennapod.ui.appstartintent.MediaButtonStarter;
 import org.greenrobot.eventbus.EventBus;
 
@@ -118,6 +119,7 @@ public class DBWriter {
     private static void deleteFeedMediaSynchronous(@NonNull Context context, @NonNull FeedMedia media) {
         Log.i(TAG, String.format(Locale.US, "Requested to delete FeedMedia [id=%d, title=%s, downloaded=%s",
                 media.getId(), media.getEpisodeTitle(), media.isDownloaded()));
+        removeSkipAnalysis(context, media);
         boolean localDelete = false;
         if (media.getLocalFileUrl() != null && media.getLocalFileUrl().startsWith("content://")) {
             // Local feed
@@ -214,6 +216,9 @@ public class DBWriter {
         List<FeedItem> removedFromQueue = new ArrayList<>();
         List<FeedItem> deleted = new ArrayList<>();
         for (FeedItem item : items) {
+            if (item.getMedia() != null && (!item.getMedia().isDownloaded() || item.getFeed().isLocalFeed())) {
+                removeSkipAnalysis(context, item.getMedia());
+            }
             if (queue.remove(item)) {
                 removedFromQueue.add(item);
             }
@@ -255,6 +260,18 @@ public class DBWriter {
 
         BackupManager backupManager = new BackupManager(context);
         backupManager.dataChanged();
+    }
+
+    private static void removeSkipAnalysis(@NonNull Context context, @NonNull FeedMedia media) {
+        SkipAnalysisScheduler scheduler = SkipAnalysisScheduler.get();
+        if (scheduler != null && media.getItem() != null && media.getItem().getFeed() != null) {
+            try {
+                scheduler.remove(context, media.getId(), String.valueOf(media.getItem().getFeed().getId()),
+                        String.valueOf(media.getItem().getId()));
+            } catch (RuntimeException error) {
+                Log.w(TAG, "Unable to remove audio skip analysis", error);
+            }
+        }
     }
 
     /**

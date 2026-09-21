@@ -14,4 +14,6 @@ public abstract class SkipAnalysisScheduler {
     }
 
     public abstract void enqueue(Context context, long mediaId);
+
+    public abstract void remove(Context context, long mediaId, String feedId, String episodeId);
 }
