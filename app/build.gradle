@@ -33,7 +33,8 @@ android {
             resValue "string", "provider_authority", "de.danoeh.antennapod.debug.provider"
         }
         release {
-            resValue "string", "provider_authority", "de.danoeh.antennapod.provider"
+            applicationIdSuffix ".demo"
+            resValue "string", "provider_authority", "de.danoeh.antennapod.demo.provider"
             minifyEnabled true
             shrinkResources true
             signingConfig signingConfigs.releaseConfig
