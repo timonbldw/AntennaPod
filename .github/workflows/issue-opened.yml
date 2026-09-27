@@ -6,6 +6,7 @@ on:
 
 jobs:
   issue-opened:
+    if: github.repository == 'AntennaPod/AntennaPod'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
@@ -16,8 +17,12 @@ jobs:
             const isBugReport = body.includes('### Steps to reproduce');
             const isFeatureRequest = body.includes('### Feature or improvement you want');
             const existingLabels = context.payload.issue.labels.map(l => l.name);
+            const isMaintainer = ['OWNER', 'MEMBER', 'COLLABORATOR'].includes(context.payload.issue.author_association);
 
             const addMissing = async (labels) => {
+              if (isMaintainer && existingLabels.length > 0) {
+                return;
+              }
               const missing = labels.filter(l => !existingLabels.includes(l));
               if (missing.length > 0) {
                 await github.rest.issues.addLabels({
