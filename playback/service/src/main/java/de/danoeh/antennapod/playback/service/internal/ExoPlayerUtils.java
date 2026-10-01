@@ -311,18 +311,24 @@ public class ExoPlayerUtils {
             }
 
             @Override
-            public void close() throws IOException {
+            public synchronized void close() throws IOException {
                 closed = true;
+                InputStream closingInput = input;
+                HttpURLConnection closingConnection = connection;
+                input = null;
+                connection = null;
                 try {
-                    if (input != null) {
-                        input.close();
+                    try {
+                        if (closingInput != null) {
+                            closingInput.close();
+                        }
+                    } finally {
+                        if (closingConnection != null) {
+                            closingConnection.disconnect();
+                        }
                     }
-                } finally {
-                    input = null;
-                    if (connection != null) {
-                        connection.disconnect();
-                    }
-                    connection = null;
+                } catch (RuntimeException e) {
+                    throw new IOException("Unable to close audio clip connection", e);
                 }
             }
 

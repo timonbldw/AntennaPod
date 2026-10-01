@@ -15,7 +15,12 @@ import java.net.URL;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.fail;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 @OptIn(markerClass = UnstableApi.class)
 @RunWith(RobolectricTestRunner.class)
@@ -70,5 +75,51 @@ public class ExoPlayerUtilsTest {
             source.close();
         }
         assertEquals(0, openedBodies.get());
+    }
+
+    @Test
+    public void captureHttpSourceDisconnectsAfterRuntimeCloseFailure() throws Exception {
+        HttpURLConnection connection = mock(HttpURLConnection.class);
+        InputStream input = mock(InputStream.class);
+        IllegalStateException failure = new IllegalStateException("Unbalanced enter/exit");
+        when(connection.getResponseCode()).thenReturn(200);
+        when(connection.getInputStream()).thenReturn(input);
+        doThrow(failure).when(input).close();
+        ExoPlayerUtils.ApMediaSourceFactory.CaptureHttpDataSource source =
+                new ExoPlayerUtils.ApMediaSourceFactory.CaptureHttpDataSource(null, url -> connection);
+        source.open(new DataSpec(Uri.parse("https://example.com/audio")));
+
+        try {
+            source.close();
+            fail("Expected close failure");
+        } catch (IOException expected) {
+            assertSame(failure, expected.getCause());
+        }
+        source.close();
+        verify(input).close();
+        verify(connection).disconnect();
+    }
+
+    @Test
+    public void captureHttpSourceWrapsRuntimeDisconnectFailure() throws Exception {
+        HttpURLConnection connection = mock(HttpURLConnection.class);
+        InputStream input = mock(InputStream.class);
+        IllegalStateException failure = new IllegalStateException("Unbalanced enter/exit");
+        when(connection.getResponseCode()).thenReturn(200);
+        when(connection.getInputStream()).thenReturn(input);
+        doThrow(failure).when(connection).disconnect();
+        ExoPlayerUtils.ApMediaSourceFactory.CaptureHttpDataSource source =
+                new ExoPlayerUtils.ApMediaSourceFactory.CaptureHttpDataSource(null, url -> connection);
+        source.open(new DataSpec(Uri.parse("https://example.com/audio")));
+
+        try {
+            source.close();
+            fail("Expected disconnect failure");
+        } catch (IOException expected) {
+            assertSame(failure, expected.getCause());
+        }
+        source.close();
+        verify(input).close();
+        verify(connection).disconnect();
     }
 }
