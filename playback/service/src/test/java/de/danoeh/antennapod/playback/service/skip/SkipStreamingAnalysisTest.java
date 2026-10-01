@@ -58,6 +58,8 @@ public class SkipStreamingAnalysisTest {
         AudioDecoderShadow.analysisFetchUnavailable = false;
         AudioDecoderShadow.cacheOnlyDecode = null;
         AudioDecoderShadow.minimumStartMs = 0;
+        AudioDecoderShadow.leadingGapStartMs = -1;
+        AudioDecoderShadow.leadingGapMs = 0;
         AudioDecoderShadow.partialAudioEndMs = -1;
         AudioDecoderShadow.partialAudioUri = null;
         AudioDecoderShadow.partialAudioStarts = Collections.emptySet();
@@ -201,6 +203,95 @@ public class SkipStreamingAnalysisTest {
             assertTrue(AudioDecoderShadow.decoderClosed.await(5, TimeUnit.SECONDS));
             assertEquals(1, AudioDecoderShadow.decoderCreations.get());
             assertEquals(1, AudioDecoderShadow.closedDecoders.get());
+        }
+    }
+
+    @Test
+    public void playbackAnalysisPairsMarkersAcrossSeekAlignedWindow() throws Exception {
+        float[] startAudio = randomAudio(16_384, 31);
+        float[] endAudio = randomAudio(16_384, 47);
+        manager.saveRule(feedId, boundedMissingEndRule(startAudio));
+        AudioDecoderShadow.audio = new float[150_000 * 8];
+        System.arraycopy(startAudio, 0, AudioDecoderShadow.audio, 80_007 * 8, startAudio.length);
+        System.arraycopy(endAudio, 0, AudioDecoderShadow.audio, 110_016 * 8, endAudio.length);
+        AudioDecoderShadow.leadingGapStartMs = 72_640;
+        AudioDecoderShadow.leadingGapMs = 7;
+        CountDownLatch ready = new CountDownLatch(1);
+        AtomicReference<SkipAnalysisSnapshot> result = new AtomicReference<>();
+        try (SkipSubscription subscription = manager.observe(feedId, "seek-aligned-window", snapshot -> {
+            if (snapshot.status == SkipAnalysisStatus.WINDOW_READY) {
+                result.set(snapshot);
+                ready.countDown();
+            }
+        })) {
+            SkipTask task = manager.analyzeForPlayback(feedId, "seek-aligned-window",
+                    Uri.parse("skip-cache://seek-aligned-window"), 150_000, 42_673, 150_000,
+                    SkipPriority.CURRENT_PLAYBACK);
+            assertTrue(ready.await(5, TimeUnit.SECONDS));
+            assertFalse(task.isDone());
+            assertTrue(requestsFor("skip-cache://seek-aligned-window").contains(72_640L));
+            assertEquals(1, result.get().coverage.size());
+            assertEquals(42_656, result.get().coverage.get(0).startMs);
+            assertEquals(150_000, result.get().coverage.get(0).endMs);
+            assertEquals(1, result.get().occurrences.size());
+            assertEquals(80_007, result.get().occurrences.get(0).startMs, SkipFingerprint.HOP_MS);
+            assertEquals(112_064, result.get().occurrences.get(0).endMs, SkipFingerprint.HOP_MS);
+            assertTrue(result.get().detections.isEmpty());
+        }
+    }
+
+    @Test
+    public void playbackAnalysisKeepsLargeLeadingGapUnsearched() throws Exception {
+        float[] startAudio = randomAudio(16_384, 31);
+        float[] endAudio = randomAudio(16_384, 47);
+        manager.saveRule(feedId, boundedMissingEndRule(startAudio));
+        AudioDecoderShadow.audio = new float[150_000 * 8];
+        System.arraycopy(startAudio, 0, AudioDecoderShadow.audio, 64_992 * 8, startAudio.length);
+        System.arraycopy(endAudio, 0, AudioDecoderShadow.audio, 80_016 * 8, endAudio.length);
+        AudioDecoderShadow.leadingGapStartMs = 72_640;
+        AudioDecoderShadow.leadingGapMs = 2_000;
+        CountDownLatch waiting = new CountDownLatch(1);
+        AtomicReference<SkipAnalysisSnapshot> result = new AtomicReference<>();
+        try (SkipSubscription subscription = manager.observe(feedId, "leading-gap", snapshot -> {
+            if (snapshot.status == SkipAnalysisStatus.WAITING_FOR_AUDIO) {
+                result.set(snapshot);
+                waiting.countDown();
+            }
+        })) {
+            manager.analyzeForPlayback(feedId, "leading-gap", Uri.parse("skip-cache://leading-gap"),
+                    150_000, 42_673, 150_000, SkipPriority.CURRENT_PLAYBACK);
+            assertTrue(waiting.await(5, TimeUnit.SECONDS));
+            assertEquals(2, result.get().coverage.size());
+            assertEquals(72_656, result.get().coverage.get(0).endMs);
+            assertEquals(74_640, result.get().coverage.get(1).startMs);
+            assertEquals(150_000, result.get().coverage.get(1).endMs);
+            assertTrue(result.get().occurrences.isEmpty());
+            assertEquals(2, result.get().detections.size());
+        }
+    }
+
+    @Test
+    public void seekAlignedWindowStillMatchesBoundarySpanningSample() throws Exception {
+        float[] marker = randomAudio(16_384, 113);
+        manager.saveRule(feedId, fixedRule(marker));
+        AudioDecoderShadow.audio = new float[150_000 * 8];
+        System.arraycopy(marker, 0, AudioDecoderShadow.audio, 101_991 * 8, marker.length);
+        AudioDecoderShadow.leadingGapStartMs = 72_640;
+        AudioDecoderShadow.leadingGapMs = 7;
+        CountDownLatch ready = new CountDownLatch(1);
+        AtomicReference<SkipAnalysisSnapshot> result = new AtomicReference<>();
+        try (SkipSubscription subscription = manager.observe(feedId, "aligned-boundary", snapshot -> {
+            if (snapshot.status == SkipAnalysisStatus.WINDOW_READY) {
+                result.set(snapshot);
+                ready.countDown();
+            }
+        })) {
+            manager.analyzeForPlayback(feedId, "aligned-boundary", Uri.parse("skip-cache://aligned-boundary"),
+                    150_000, 42_673, 150_000, SkipPriority.CURRENT_PLAYBACK);
+            assertTrue(ready.await(5, TimeUnit.SECONDS));
+            assertEquals(1, result.get().coverage.size());
+            assertEquals(1, result.get().occurrences.size());
+            assertEquals(101_991, result.get().occurrences.get(0).startMs, SkipFingerprint.HOP_MS);
         }
     }
 
@@ -904,6 +995,8 @@ public class SkipStreamingAnalysisTest {
         private static volatile boolean analysisFetchUnavailable;
         private static volatile CountDownLatch cacheOnlyDecode;
         private static volatile long minimumStartMs;
+        private static volatile long leadingGapStartMs;
+        private static volatile long leadingGapMs;
         private static volatile long partialAudioEndMs;
         private static volatile String partialAudioUri;
         private static volatile Set<Long> partialAudioStarts;
@@ -1008,14 +1101,15 @@ public class SkipStreamingAnalysisTest {
             if (partial) {
                 actualEndMs = Math.min(actualEndMs, partialAudioEndMs);
             }
-            float[] samples = audio == null ? new float[(int) (endMs - startMs) * 8]
-                    : Arrays.copyOfRange(audio, (int) startMs * 8, (int) actualEndMs * 8);
+            long actualStartMs = startMs == leadingGapStartMs ? startMs + leadingGapMs : startMs;
+            float[] samples = audio == null ? new float[(int) (endMs - actualStartMs) * 8]
+                    : Arrays.copyOfRange(audio, (int) actualStartMs * 8, (int) actualEndMs * 8);
             if (partial && actualEndMs < endMs) {
-                return new SkipAudioDecoder.DecodedAudio(startMs, samples,
-                        actualEndMs - startMs, false).withCacheMiss();
+                return new SkipAudioDecoder.DecodedAudio(actualStartMs, samples,
+                        actualEndMs - actualStartMs, false).withCacheMiss();
             }
-            return new SkipAudioDecoder.DecodedAudio(startMs, samples,
-                    actualEndMs - startMs, true, emptyEof && actualEndMs < endMs);
+            return new SkipAudioDecoder.DecodedAudio(actualStartMs, samples,
+                    actualEndMs - actualStartMs, actualStartMs == startMs, emptyEof && actualEndMs < endMs);
         }
     }
 

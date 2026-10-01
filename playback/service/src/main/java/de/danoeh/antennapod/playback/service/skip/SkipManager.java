@@ -887,6 +887,8 @@ public final class SkipManager {
             }
             if (SkipStreamingSource.isStreaming(audioUri)
                     && (!decoded.complete && !decoded.cacheMiss
+                    && !(cacheOnlyStreaming && decoded.startMs > decodeStart
+                    && (decoded.eof || actualEnd >= decodeEnd - 1))
                     || decoded.startMs > startMs && !cacheOnlyStreaming)) {
                 throw new SkipStreamingSource.UnavailableException(
                         "Audio window has incomplete decoder coverage");
