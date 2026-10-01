@@ -548,6 +548,43 @@ public class SkipStreamingSourceTest {
     }
 
     @Test
+    public void tinyReadsFetchAheadAndReuseCache() throws Exception {
+        byte[] upstream = new byte[128 * 1024];
+        AtomicInteger sources = new AtomicInteger();
+        SkipStreamingSource.Registration registration = SkipStreamingSource.register(cache,
+                Uri.parse("https://example.com/audio.mp3"), () -> {
+                    sources.incrementAndGet();
+                    return new ByteArrayDataSource(upstream);
+                });
+        cache.applyContentMetadataMutations(registration.cacheKey,
+                ContentMetadataMutations.setContentLength(new ContentMetadataMutations(), upstream.length));
+
+        try (SkipStreamingSource.CachedMediaDataSource source = SkipStreamingSource.open(registration.uri, true)) {
+            byte[] result = new byte[1];
+            assertEquals(1, source.readAt(0, result, 0, 1));
+            assertEquals(64 * 1024, cache.getCachedLength(registration.cacheKey, 0, upstream.length));
+            assertEquals(1, source.readAt(1, result, 0, 1));
+            assertEquals(1, source.readAt(64 * 1024 - 1, result, 0, 1));
+            assertEquals(1, sources.get());
+        }
+    }
+
+    @Test
+    public void fetchAheadStopsAtNextCachedSpan() throws Exception {
+        byte[] upstream = new byte[128 * 1024];
+        SkipStreamingSource.Registration registration = SkipStreamingSource.register(cache,
+                Uri.parse("https://example.com/audio.mp3"), () -> new ByteArrayDataSource(upstream));
+        cache.applyContentMetadataMutations(registration.cacheKey,
+                ContentMetadataMutations.setContentLength(new ContentMetadataMutations(), upstream.length));
+        writeCache(registration.cacheKey, 1024, new byte[1024]);
+
+        try (SkipStreamingSource.CachedMediaDataSource source = SkipStreamingSource.open(registration.uri, true)) {
+            assertEquals(1, source.readAt(0, new byte[1], 0, 1));
+            assertEquals(2048, cache.getCachedLength(registration.cacheKey, 0, upstream.length));
+        }
+    }
+
+    @Test
     public void cacheOnlyOpenDoesNotUseConfiguredUpstream() throws Exception {
         AtomicInteger sources = new AtomicInteger();
         SkipStreamingSource.Registration registration = SkipStreamingSource.register(cache,

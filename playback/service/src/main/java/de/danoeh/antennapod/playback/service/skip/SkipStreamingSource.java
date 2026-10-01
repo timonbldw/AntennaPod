@@ -361,7 +361,8 @@ public final class SkipStreamingSource {
             }
             long cachedLength;
             try {
-                cachedLength = source.cache.getCachedLength(source.cacheKey, position, readSize);
+                cachedLength = source.cache.getCachedLength(source.cacheKey, position,
+                        Math.min(Math.max(readSize, MIN_FETCH_SIZE), size - position));
             } catch (RuntimeException e) {
                 throw unavailable("Streaming cache is unavailable", e);
             }
